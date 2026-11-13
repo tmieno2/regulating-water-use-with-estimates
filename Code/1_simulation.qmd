@@ -125,9 +125,9 @@ saveRDS(sum_proxy_res, here::here("Results/proxy_results_summary.rds"))
 saveRDS(sum_water_res, here::here("Results/water_results_summary.rds"))
 ```
 
-## Each farmer's profit relative to the water-based policy (Figure 6)
+## Each farmer's change in profit (Figure 6)
 
-For each farmer, profit under a proxy-based policy is divided by profit under the corresponding water-based policy. A proxy quota is compared with the water quota whose realized average water use is closest to its own. Proxy-quota trading is compared with water-quota trading at the same cap. A ratio has no meaning when profit under the water-based policy is not positive (a few high-heterogeneity farmers), so those farmers are left out.
+For each farmer, profit under a proxy-based policy minus profit under the corresponding water-based policy, in dollars per acre. A proxy quota is compared with the water quota whose realized average water use is closest to its own. Proxy-quota trading is compared with water-quota trading at the same cap.
 
 ```{r}
 prob_ls <- seq(0.01, 0.99, by = 0.01)
@@ -140,7 +140,7 @@ quota_match <-
   ] %>%
   unique(by = c("target_w_proxy", "dir_cor", "u_dev", "prod_het"))
 
-ratio_quota <-
+change_quota <-
   results_w[instrument_type == "Quota", .(target_w_water = target_w, profit_water = profit, prod_het, farmer)][
     quota_match[
       results_p[instrument_type == "Quota", .(target_w_proxy = target_w, profit_proxy = profit, dir_cor, u_dev, prod_het, farmer, case)],
@@ -148,50 +148,33 @@ ratio_quota <-
     ],
     on = .(target_w_water, prod_het, farmer)
   ] %>%
-  .[profit_water > 0, ] %>%
-  .[, ratio := profit_proxy / profit_water]
-
-profit_ratio_quota <-
-  ratio_quota[, .(ratio = quantile(ratio, prob = prob_ls)), by = .(w, dir_cor, u_dev, prod_het)] %>%
-  .[, prob := rep(prob_ls, .N / length(prob_ls))]
+  .[, change := profit_proxy - profit_water]
 
 #--- trading: the same cap ---#
-ratio_trading <-
+change_trading <-
   results_w[instrument_type == "Trading", .(target_w, profit_water = profit, prod_het, farmer)][
     results_p[instrument_type == "Trading", .(target_w, profit_proxy = profit, dir_cor, u_dev, prod_het, farmer, case)],
     on = .(target_w, prod_het, farmer)
   ] %>%
-  .[profit_water > 0, ] %>%
-  .[, ratio := profit_proxy / profit_water]
+  .[, change := profit_proxy - profit_water]
 
-profit_ratio_trading <-
-  ratio_trading[, .(ratio = quantile(ratio, prob = prob_ls)), by = .(target_w, dir_cor, u_dev, prod_het)] %>%
-  .[, prob := rep(prob_ls, .N / length(prob_ls))]
-
-#--- errors unrelated to water demand, at 8 inches of realized use (quota) or a cap of 8 (trading) ---#
-profit_ratio <-
-  rbind(
-    profit_ratio_trading[dir_cor == "0" & target_w == 8, .(u_dev, prod_het, ratio, prob)][, instrument_type := "Trading"],
-    profit_ratio_quota[dir_cor == "0", ] %>%
-      .[, dev_w := abs(w - 8), by = .(prod_het, u_dev)] %>%
-      .[, .SD[dev_w == min(dev_w)], by = .(prod_het, u_dev)] %>%
-      .[, .(u_dev, prod_het, ratio, prob)] %>%
-      .[, instrument_type := "Quota"]
-  ) %>%
-  .[, prod_het := factor(str_to_title(prod_het), c("Zero", "Medium", "High"))]
-
-saveRDS(profit_ratio, here::here("Results/profit_ratio.rds"))
-
-#--- share of farmers (over all draws of the errors) whose profit differs by more than 5% from the water-based policy,
-#    for the same policies as in Figure 6 ---#
+#--- errors unrelated to water demand, at about 8 inches of realized use (quota) or a cap of 8 (trading) ---#
 closest_to_8 <- \(d) d[, dev_w := abs(w - 8)][, .SD[dev_w == min(dev_w)], by = .(prod_het, u_dev)]
-
-changed_share <-
+at_8 <-
   rbind(
-    ratio_trading[dir_cor == "0" & target_w == 8, .(share_changed_5pct = mean(abs(ratio - 1) > 0.05)), by = .(u_dev, prod_het)][, instrument_type := "Trading"],
-    closest_to_8(ratio_quota[dir_cor == "0", ])[, .(share_changed_5pct = mean(abs(ratio - 1) > 0.05)), by = .(u_dev, prod_het)][, instrument_type := "Quota"]
+    change_trading[dir_cor == "0" & target_w == 8, .(u_dev, prod_het, change)][, instrument_type := "Trading"],
+    closest_to_8(change_quota[dir_cor == "0", ])[, .(u_dev, prod_het, change)][, instrument_type := "Quota"]
   ) %>%
   .[, prod_het := factor(str_to_title(prod_het), c("Zero", "Medium", "High"))]
+
+#--- 1st to 99th percentiles across farmers and draws of the errors ---#
+profit_change <-
+  at_8[, .(change = quantile(change, prob = prob_ls), prob = prob_ls), by = .(instrument_type, prod_het, u_dev)]
+
+saveRDS(profit_change, here::here("Results/profit_change.rds"))
+
+#--- share of farmers (over all draws of the errors) whose profit changes by more than $10 per acre ---#
+changed_share <- at_8[, .(share_changed_10 = mean(abs(change) > 10)), by = .(instrument_type, prod_het, u_dev)]
 
 saveRDS(changed_share, here::here("Results/profit_changed_share.rds"))
 ```

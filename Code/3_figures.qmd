@@ -134,19 +134,19 @@ g_trade_effect_profit <-
 ggsave(fig("g_trade_effect_profit.png"), g_trade_effect_profit, height = 6, width = 6, dpi = 400)
 ```
 
-## Each farmer's profit relative to the water-based policy (Figure 6)
+## Each farmer's change in profit (Figure 6)
 
 ```{r}
-profit_ratio <- readRDS(here::here("Results/profit_ratio.rds"))
+profit_change <- readRDS(here::here("Results/profit_change.rds"))
 
-g_profit_ratio <-
-  ggplot(profit_ratio) +
-  geom_line(aes(x = ratio, y = prob, color = instrument_type)) +
+g_profit_change <-
+  ggplot(profit_change) +
+  geom_vline(xintercept = 0, color = "grey50", linetype = "dotted") +
+  geom_line(aes(x = change, y = prob, color = instrument_type)) +
   facet_grid(u_dev ~ prod_het, labeller = panel_labels) +
-  xlab("Ratio of Profit under Proxy-based to Water-based systems") +
+  xlab("Change in profit from the water-based to the proxy-based policy ($/acre)") +
   ylab("Cumulative Probability") +
   scale_color_manual(values = pal_instrument, name = "Instrument Type") +
-  scale_x_continuous(breaks = seq(0.2, ceiling(profit_ratio[, max(ratio)]), by = 0.4)) +
   scale_y_continuous(breaks = seq(0, 1, by = 0.25)) +
   theme_bw() +
   theme(
@@ -156,7 +156,7 @@ g_profit_ratio <-
     panel.spacing.x = unit(0.6, "lines")
   )
 
-ggsave(fig("g_profit_ratio.png"), g_profit_ratio, height = 6, width = 6, dpi = 400)
+ggsave(fig("g_profit_change.png"), g_profit_change, height = 6, width = 6, dpi = 400)
 ```
 
 ## Realized water use against the nominal cap (Supplementary Fig. 3)
@@ -263,9 +263,15 @@ ggsave(fig("g_quota_target_def.png"), g_quota_target_def, height = 6.5, width = 
 ```{r}
 il <- readRDS(here::here("Results/illustration_data.rds"))
 
+#--- the vertical axis shows the profit curves from 50 below the lowest marked point; a grey line marks zero profit ---#
+marked <- c(il$production_at_quota$profit, il$proxy_trade_data$profit, il$quota_data_het$profit)
+y_range <- c(floor(min(marked) / 50) * 50 - 50, ceiling(max(il$farm_data_1$profit, il$farm_data_het$profit) / 50) * 50)
+
 profit_axis <- list(
+  geom_hline(yintercept = 0, color = "grey60"),
   scale_x_continuous(breaks = 0:15),
-  scale_y_continuous(breaks = (0:10) * 50, limits = c(0, NA)),
+  scale_y_continuous(breaks = seq(-1000, 1000, by = 50)),
+  coord_cartesian(ylim = y_range),
   theme_bw(),
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
 )
@@ -294,9 +300,9 @@ g_illustration_homogeneous_with_trade <-
   geom_segment(
     data = data.table(
       x = il$production_at_quota[measure_type == "Proxy", w],
-      y = c(200, 200),
+      y = rep(y_range[1] + 25, 2),
       xend = il$proxy_trade_data[measure_type == "Proxy", w],
-      yend = c(200, 200),
+      yend = rep(y_range[1] + 25, 2),
       measure_type = c("Proxy", "Proxy"),
       farmer = c("A", "B")
     ),

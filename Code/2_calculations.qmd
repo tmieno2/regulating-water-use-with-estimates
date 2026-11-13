@@ -175,17 +175,20 @@ rbindlist(lapply(hets, \(h) rbindlist(lapply(c(0, 0.1, 0.3, 0.5), \(u) {
   rounded() %>%
   print()
 
-cat("\n== Profit ratio (proxy-based / water-based) at 8 inches: percentiles, and share of farmers whose profit differs by more than 5% ==\n")
-profit_ratio <- readRDS(here::here("Results/profit_ratio.rds"))
-stopifnot(profit_ratio[, .N, by = .(u_dev, prod_het, instrument_type)][, all(N == 99)])
-profit_ratio %>%
+cat("\n== Change in profit (proxy-based minus water-based, $ per acre) at 8 inches: percentiles, and share of farmers whose profit changes by more than $10 per acre ==\n")
+profit_change <- readRDS(here::here("Results/profit_change.rds"))
+stopifnot(profit_change[, .N, by = .(u_dev, prod_het, instrument_type)][, all(N == 99)])
+pct_at <- \(x, p, q) x[which.min(abs(p - q))]
+profit_change %>%
   .[, .(
-    p01 = ratio[which.min(abs(prob - 0.01))], p25 = ratio[which.min(abs(prob - 0.25))],
-    p75 = ratio[which.min(abs(prob - 0.75))], p99 = ratio[which.min(abs(prob - 0.99))]
+    p01 = pct_at(change, prob, 0.01), p25 = pct_at(change, prob, 0.25), p75 = pct_at(change, prob, 0.75), p99 = pct_at(change, prob, 0.99)
   ), by = .(u_dev, prod_het, instrument_type)] %>%
   readRDS(here::here("Results/profit_changed_share.rds"))[., on = .(u_dev, prod_het, instrument_type)] %>%
   rounded(3) %>%
   print()
+
+cat("\n== Average profit under a water quota at 8 inches of realized use ($ per acre) ==\n")
+loss_table[u_dev == 0.5 & dir_cor == "0", .(prod_het, profit_water = round(profit_water, 1))] %>% print()
 ```
 
 ## Counterexample to Proposition 1 with very different farmers (Supplementary Note 1)
@@ -276,11 +279,11 @@ results_at_8 <- function(f, h, shape, target = 8) {
   data.table(
     extra_cost_quota = mean(pi_water) - mean(pi_proxy),
     use_at_nominal_8 = mean(use_proxy(8)),
-    #--- the ratio is computed only where profit under the water-based policy is positive, as in Figure 6 ---#
-    worst_1pct_quota = quantile((pi_proxy / pi_water)[pi_water > 0], 0.01),
+    #--- the 1st percentile of the change in profit, as in Figure 6 ---#
+    worst_1pct_quota = quantile(pi_proxy - pi_water, 0.01),
     extra_cost_trading = mean(pi_wt) - mean(pi_pt),
     use_at_cap_8 = mean(use_given_price(r_cap)),
-    worst_1pct_trading = quantile((pi_pt / pi_wt)[pi_wt > 0], 0.01),
+    worst_1pct_trading = quantile(pi_pt - pi_wt, 0.01),
     #--- share of farmer and error combinations whose estimated use is zero under trading (possible only with an additive error) ---#
     share_zero_estimate = mean(estimated(w_pt) == 0)
   )

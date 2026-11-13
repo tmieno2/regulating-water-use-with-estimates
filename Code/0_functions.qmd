@@ -14,11 +14,13 @@ library(tidyr)
 
 ## Prices and costs
 
+All other costs per acre (`other_cost`) are taken from the University of Nebraska-Lincoln's 2026 budget for corn under an electric center pivot (budget #33, corn after soybeans, no till): its total economic cost, $1,203.96 per acre, which includes the opportunity cost of land, less its cost of pumping energy, $32.83 per acre, which the model counts separately. The result, $1,171.13, is rounded to $1,170.
+
 ```{r}
 corn_price <- 6 # $ per bushel
 e_price <- 0.15 # $ per kWh
 w_price <- e_price * 500 / 12 # $ per acre-inch: 500 kWh to pump one acre-foot, 12 inches per foot
-other_cost <- 800 # $ per acre
+other_cost <- 1170 # $ per acre
 ```
 
 ## Farmers
