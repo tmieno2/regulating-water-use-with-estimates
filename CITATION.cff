@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "Code for: Regulating water use with estimates instead of measurements can have unintended costs"
+type: software
+authors:
+  - family-names: Mieno
+    given-names: Taro
+    affiliation: University of Nebraska-Lincoln
+    orcid: "https://orcid.org/0000-0002-0614-0771"
+  - family-names: Foster
+    given-names: Timothy
+    affiliation: University of Manchester
+    orcid: "https://orcid.org/0000-0001-9594-1556"
+  - family-names: Brozović
+    given-names: Nicholas
+    affiliation: University of Nebraska-Lincoln
+    orcid: "https://orcid.org/0000-0002-2218-4934"
+repository-code: "https://github.com/tmieno2/regulating-water-use-with-estimates"
+license: MIT

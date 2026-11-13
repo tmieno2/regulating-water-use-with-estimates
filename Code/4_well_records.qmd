@@ -1,0 +1,223 @@
+---
+title: "Well and power records from public sources (Supplementary Note 3)"
+---
+
+This file builds, from public sources only, the two tables that `Code/5_energy_estimates.qmd` pairs: annual pumping of each well and annual electricity use of each irrigation account of Midwest Electric Cooperative (the Midwest public power district), southwest Nebraska, with the land survey location of each.
+
+Sources:
+
+1. Nebraska data archives of the Republican River Compact Administration, one per year, `https://www.republicanrivercompact.org/YYYY/html/zip/neYY.zip`. Each holds the well database that Nebraska submits for the compact's groundwater model (well registration number, district, irrigated acres, pumped volume, and whether the volume was metered) and the power records of the electricity suppliers (legal land description, kWh, load in horsepower). The 2008 archive holds only model input grids, so 2008 is not used.
+2. Nebraska's registry of groundwater wells, served by the Nebraska Department of Water, Energy, and Environment at `https://gis.ne.gov/agency3/rest/services/Groundwater_Wells_DWEE/FeatureServer/0`. It gives each well's legal land description and its recorded static and pumping water levels. Only those fields and the registration number are downloaded. The registry is updated over time, so the download date is recorded with the snapshot; the paper uses a snapshot taken on 12 November 2026, and a later download can give slightly different numbers.
+
+Downloads are saved in `Data/downloads/` and are not downloaded again if present. The tables are saved in `Data/raw/`. Neither folder is shared, because the tables contain well locations.
+
+```{r}
+#| include: false
+library(data.table)
+dl <- here::here("Data/downloads/rrca")
+ex <- file.path(dl, "extracted")
+dir.create(ex, showWarnings = FALSE, recursive = TRUE)
+dir.create(here::here("Data/raw"), showWarnings = FALSE)
+dir.create(here::here("Results"), showWarnings = FALSE)
+```
+
+## Download the compact's archives
+
+```{r}
+years <- c(2007, 2009, 2010, 2011, 2012)
+options(timeout = 3600)
+
+for (y in years) {
+  f <- file.path(dl, sprintf("ne%02d.zip", y %% 100))
+  #--- download to a temporary name first, so that an interrupted download is not mistaken for a complete one ---#
+  if (!file.exists(f)) {
+    download.file(sprintf("https://www.republicanrivercompact.org/%d/html/zip/ne%02d.zip", y, y %% 100), paste0(f, ".part"), mode = "wb")
+    file.rename(paste0(f, ".part"), f)
+  }
+}
+```
+
+## Files inside the archives
+
+The archives are organized differently each year. The table lists, for each year, the well database and the Midwest power records, and the columns that hold the needed fields.
+
+```{r}
+sources <- rbindlist(list(
+  list(year = 2007, zip = "ne07.zip", inner = NA, well = "ne07/Pumping/Irrigation/WellDatabase07b.xls", well_sheet = NA,
+       power_zip = NA, power = "ne07/Pumping/Irrigation/PowerRecords/Midwest Electric 2007 Irrigation Statistics.xls",
+       c_nrd = "NRD_ID", c_acres = "ACRES", c_vol = "VOLUME"),
+  list(year = 2009, zip = "ne09.zip", inner = NA, well = "ne09/PumpingAcres/WellDatabase_09.xls", well_sheet = "WellDatabase_09",
+       power_zip = NA, power = "ne09/PowerRecords/Midwest IRRIGATION INFO 2009.xls",
+       c_nrd = "NRDID", c_acres = "Acres", c_vol = "VOL_AF"),
+  list(year = 2010, zip = "ne10.zip", inner = NA, well = "ne10/Wells/WellDatabase_10.dbf", well_sheet = NA,
+       power_zip = NA, power = "ne10/PowerRecords/Midwest Electric 2010 Irrigation Data.xlsx",
+       c_nrd = "NRDID", c_acres = "ACRES", c_vol = "VOL_AF"),
+  list(year = 2011, zip = "ne11.zip", inner = "ne11/Pumping_Acres/Wells2011.zip", well = "WellDatabase2011.dbf", well_sheet = NA,
+       power_zip = "ne11/Pumping_Acres/PowerRecords2011.zip", power = "MW_PPD_IrrigationData2011.xlsx",
+       c_nrd = "NRD", c_acres = "IRRACR", c_vol = "VOLAF"),
+  list(year = 2012, zip = "ne12.zip", inner = NA, well = "ne12/Pumping_Acres/Wells2012/WellDatabase_12.dbf", well_sheet = NA,
+       power_zip = NA, power = "ne12/Pumping_Acres/ElectricalPowerRecords2012/MidwestPPD_2012.xlsx",
+       c_nrd = "NRD_ID", c_acres = "IRRACR", c_vol = "VOLAF")
+))
+```
+
+## Read the well databases and power records
+
+Locations are given in the US public land survey: a township and range number identify a square of 6 by 6 miles, a section is one square mile within it, and a quarter section is a quarter of a section.
+
+District codes: 21 or `UR` is the Upper Republican Natural Resources District and 22 or `MR` the Middle Republican; other districts keep their code. The legal land description of a power record is usually "quarter section township range", for example `NE 35 14 34`, sometimes followed by a label, and is written in several other ways that the function below reads. A record whose description gives section, township and range but no single quarter section is located to the section only. Records whose description gives no section, township and range are dropped.
+
+```{r}
+district_name <- function(x) {
+  x <- as.character(x)
+  fcase(x %in% c("21", "UR"), "Upper Republican", x %in% c("22", "MR"), "Middle Republican", default = x)
+}
+
+#--- Descriptions such as "NE 35 14 34", "SE 2 10 33   FY#1", "SW 25-9-39", "NW/SW 04 11 33", "NW OF SW 22-14-36",
+#    "CENTER 36 13 35", "NE&SE 5 11 33" or "20-09-38": words before the first number, then section, township and range.
+#    The quarter is the last of NE, NW, SE or SW among those words (for a quarter-quarter such as NW/SW, the quarter
+#    that contains it). It is left missing for a center, for a description that names two quarters (&), or for none. ---#
+parse_legal <- function(legal) {
+  x <- toupper(as.character(legal))
+  x <- gsub("([A-Z]{2})[/-]([A-Z]{2})", "\\1 \\2", x)
+  x <- gsub("[-/,]", " ", x)
+  x <- gsub("\\bO(\\d)", "0\\1", x, perl = TRUE)
+  m <- regmatches(x, regexec("^\\s*((?:[A-Z&]+\\s+)*)(\\d{1,2})\\s+(\\d{1,3})\\s+(\\d{1,2})(?:\\s|$)", x, perl = TRUE))
+  quarter_of <- function(prefix) {
+    if (grepl("&", prefix)) return(NA_character_)
+    tok <- strsplit(trimws(prefix), "\\s+")[[1]]
+    tok <- ifelse(nchar(tok) == 4, substr(tok, 3, 4), tok)
+    q <- tok[tok %in% c("NE", "NW", "SE", "SW")]
+    if (length(q)) q[length(q)] else NA_character_
+  }
+  data.table(
+    quarter = vapply(m, \(v) if (length(v)) quarter_of(v[2]) else NA_character_, ""),
+    sec = vapply(m, \(v) if (length(v)) as.integer(v[3]) else NA_integer_, 1L),
+    twp = vapply(m, \(v) if (length(v)) as.integer(v[4]) else NA_integer_, 1L),
+    rng = vapply(m, \(v) if (length(v)) as.integer(v[5]) else NA_integer_, 1L)
+  )
+}
+
+#--- check on the descriptions above ---#
+local({
+  t <- parse_legal(c("NE 35 14 34", "SE 2 10 33   FY#1", "SW 25-9-39", "NW/SW 04 11 33", "NW OF SW 22-14-36", "CENTER 36 13 35", "NE&SE 5 11 33", "20-09-38", "NE 32 O9 38", "1140231"))
+  stopifnot(
+    identical(t$quarter, c("NE", "SE", "SW", "SW", "SW", NA, NA, NA, "NE", NA)),
+    identical(t$sec, c(35L, 2L, 25L, 4L, 22L, 36L, 5L, 20L, 32L, NA)),
+    identical(t$rng, c(34L, 33L, 39L, 33L, 36L, 35L, 33L, 38L, 38L, NA))
+  )
+})
+
+read_table <- function(file, sheet = NA) {
+  if (grepl("\\.dbf$", file)) {
+    as.data.table(foreign::read.dbf(file, as.is = TRUE))
+  } else {
+    as.data.table(suppressMessages(readxl::read_excel(file, sheet = if (is.na(sheet)) 1 else sheet)))
+  }
+}
+
+to_num <- \(x) as.numeric(gsub(",", "", as.character(x)))
+
+wells_list <- list()
+power_list <- list()
+for (i in seq_len(nrow(sources))) {
+  s <- sources[i, ]
+  zip <- file.path(dl, s$zip)
+  #--- wells ---#
+  if (is.na(s$inner)) {
+    unzip(zip, files = grep(sub("\\.dbf$", "", s$well), unzip(zip, list = TRUE)$Name, value = TRUE, fixed = TRUE), exdir = ex)
+    well_file <- file.path(ex, s$well)
+  } else {
+    unzip(zip, files = s$inner, exdir = ex)
+    unzip(file.path(ex, s$inner), files = s$well, exdir = file.path(ex, s$year))
+    well_file <- file.path(ex, s$year, s$well)
+  }
+  w <- read_table(well_file, s$well_sheet)
+  wells_list[[i]] <- w[, .(
+    wellid = as.integer(WELLID), year = s$year, district = district_name(get(s$c_nrd)),
+    acres = to_num(get(s$c_acres)), volaf = to_num(get(s$c_vol)), source = toupper(SOURCE)
+  )]
+  #--- Midwest power records ---#
+  if (is.na(s$power_zip)) {
+    unzip(zip, files = s$power, exdir = ex)
+    power_file <- file.path(ex, s$power)
+  } else {
+    unzip(zip, files = s$power_zip, exdir = ex)
+    unzip(file.path(ex, s$power_zip), files = s$power, exdir = file.path(ex, s$year))
+    power_file <- file.path(ex, s$year, s$power)
+  }
+  p <- read_table(power_file)
+  p <- p[!is.na(LEGAL), .(legal = as.character(LEGAL), kwh = to_num(KWH), hp = to_num(HP))]
+  power_list[[i]] <- cbind(p[, .(year = s$year, kwh, hp)], parse_legal(p$legal))
+}
+
+wells <- rbindlist(wells_list)
+power <- rbindlist(power_list)[!is.na(kwh) & !is.na(sec) & !is.na(twp) & !is.na(rng), ]
+
+#--- record counts, for the Supplementary Information ---#
+build_counts <- list(
+  well_years = wells[, .N, by = year],
+  power_records = rbindlist(power_list)[, .N, by = year],
+  power_located = power[, .N, by = year],
+  power_quarter = power[!is.na(quarter), .N, by = year]
+)
+```
+
+## Well locations from the registry
+
+The registry is queried once; delete `Data/downloads/well_registry_locations.csv` to download it again.
+
+```{r}
+snapshot <- here::here("Data/downloads/well_registry_locations.csv")
+
+if (!file.exists(snapshot)) {
+  service <- "https://gis.ne.gov/agency3/rest/services/Groundwater_Wells_DWEE/FeatureServer/0/query"
+  ids <- sort(unique(wells$wellid))
+  batches <- split(ids, ceiling(seq_along(ids) / 400))
+
+  #--- the query is sent by POST because a list of 400 registration numbers is too long for a web address ---#
+  registry <- rbindlist(lapply(batches, \(b) {
+    h <- curl::new_handle()
+    curl::handle_setform(h,
+      where = paste0("WellID in (", paste(b, collapse = ","), ")"),
+      outFields = "WellID,Location,StaticWaterLevel,PumpingWaterLevel",
+      returnGeometry = "false", f = "json"
+    )
+    res <- curl::curl_fetch_memory(service, handle = h)
+    reply <- jsonlite::fromJSON(rawToChar(res$content))
+    stopifnot(res$status_code == 200, !is.null(reply$features))
+    as.data.table(reply$features$attributes)
+  }), fill = TRUE)
+
+  #--- every queried well should be in the reply, apart from wells missing from the registry ---#
+  cat(nrow(registry), "of", length(ids), "wells found in the registry\n")
+
+  registry[, download_date := as.character(Sys.Date())]
+  fwrite(registry, snapshot)
+}
+
+registry <- fread(snapshot)
+cat("Registry downloaded on", as.character(unique(registry$download_date)), "\n")
+
+#--- "NESW S16-T7-R40West": quarter-quarter NE of quarter SW, section 16, township 7 north, range 40 west ---#
+loc <- regmatches(registry$Location, regexec("^\\s*([A-Z]{2,4})?\\s*S(\\d+)-T(\\d+)-R(\\d+)West", registry$Location))
+registry[, `:=`(
+  quarter = vapply(loc, \(v) if (length(v) && nchar(v[2]) >= 2) substr(v[2], nchar(v[2]) - 1, nchar(v[2])) else NA_character_, ""),
+  sec = vapply(loc, \(v) if (length(v)) as.integer(v[3]) else NA_integer_, 1L),
+  twp = vapply(loc, \(v) if (length(v)) as.integer(v[4]) else NA_integer_, 1L),
+  rng = vapply(loc, \(v) if (length(v)) as.integer(v[5]) else NA_integer_, 1L)
+)]
+registry[!quarter %in% c("NE", "NW", "SE", "SW"), quarter := NA_character_]
+
+wells_located <-
+  unique(registry[, .(wellid = WellID, quarter, sec, twp, rng, swl = StaticWaterLevel, pwl = PumpingWaterLevel)], by = "wellid")[wells, on = "wellid"]
+
+build_counts$wells_in_registry <- wells_located[!is.na(sec), .N, by = year]
+build_counts$wells_with_quarter <- wells_located[!is.na(quarter), .N, by = year]
+
+saveRDS(wells_located, here::here("Data/raw/wells_public.rds"))
+saveRDS(power, here::here("Data/raw/midwest_power_public.rds"))
+saveRDS(build_counts, here::here("Results/energy_build_counts.rds"))
+
+build_counts
+```

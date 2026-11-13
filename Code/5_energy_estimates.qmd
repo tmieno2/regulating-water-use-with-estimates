@@ -1,0 +1,292 @@
+---
+title: "Electricity-based estimates of pumping against metered pumping (Supplementary Note 3)"
+---
+
+This file compares an electricity-based estimate of pumping with metered pumping for irrigation wells in the Upper and Middle Republican Natural Resources Districts, Nebraska, for 2007 and 2009 to 2012.
+
+The first section pairs wells with electricity records using the tables built by `Code/4_well_records.qmd`, which contain well locations and are not shared. It runs only if those tables exist. The paired records, with well identifiers and locations removed, are shared as `Data/energy_water_deidentified.csv`. The first section writes a rebuilt copy to `Results/` and reports whether it is identical to the shared file; it can differ if the well registry has changed since the shared file was made. Everything after the first section runs from the shared file.
+
+```{r}
+#| include: false
+library(data.table)
+library(dplyr)
+library(ggplot2)
+dir.create(here::here("Results"), showWarnings = FALSE)
+dir.create(here::here("Figures"), showWarnings = FALSE)
+raw_tables <- here::here("Data/raw", c("midwest_power_public.rds", "wells_public.rds"))
+```
+
+## Pair wells and electricity records by location
+
+A well and an electricity record are paired in a year when each is the only one in its quarter section, or, failing that, the only one in its section. No condition is placed on how stable the ratio of water to electricity is over time, because that is one of the things measured below.
+
+A well-year is dropped if its electricity use is less than what is needed just to lift the pumped water from the static water level (1.024 kWh per acre-foot per foot of lift).
+
+```{r}
+#| eval: !expr all(file.exists(raw_tables))
+#--- electricity records: one row per account and year, located to section and, where known, quarter section ---#
+el <- readRDS(raw_tables[1])[, .(year, kwh, hp, twp, rng, sec, subsec = quarter)]
+
+#--- wells: every well in the compact's well database, in any district, so that the counts per location are complete;
+#    wells without a location in the registry cannot be paired ---#
+wells <-
+  readRDS(raw_tables[2]) %>%
+  .[!is.na(sec), .(wellid, district, year, twp, rng, sec, subsec = quarter, volaf, acres, source, swl, pwl)]
+
+#--- number of wells and of electricity records in each section and quarter section, by year ---#
+wells[, n_sec := .N, by = .(twp, rng, sec, year)]
+wells[!is.na(subsec), n_q := .N, by = .(twp, rng, sec, subsec, year)]
+el[, n_sec := .N, by = .(twp, rng, sec, year)]
+el[!is.na(subsec), n_q := .N, by = .(twp, rng, sec, subsec, year)]
+
+keep <- c("wellid", "district", "year", "volaf", "acres", "source", "swl", "pwl", "kwh", "hp")
+
+matched <-
+  rbind(
+    #--- one well and one record in the quarter section ---#
+    merge(wells[n_q == 1, ], el[n_q == 1, ], by = c("twp", "rng", "sec", "subsec", "year"))[, ..keep],
+    #--- one well and one record in the whole section ---#
+    merge(wells[n_sec == 1, ], el[n_sec == 1, ], by = c("twp", "rng", "sec", "year"))[, ..keep]
+  ) %>%
+  unique(by = c("wellid", "year")) %>%
+  .[district %in% c("Upper Republican", "Middle Republican"), ] %>%
+  .[, pairs_in_districts := .N] %>%
+  .[source == "METER" & kwh > 0 & volaf > 0, ] %>%
+  #--- physical screen: share of the electricity that lifting the water from the static water level would take ---#
+  .[, lift_share := 1.024 * swl * volaf / kwh]
+
+cat("well-years dropped as physically impossible:", matched[, sum(lift_share > 1, na.rm = TRUE)], "\n")
+
+#--- counts for the Supplementary Information ---#
+saveRDS(list(
+  pairs_quarter = merge(wells[n_q == 1, ], el[n_q == 1, ], by = c("twp", "rng", "sec", "subsec", "year"))[district %in% c("Upper Republican", "Middle Republican"), .N],
+  pairs_in_districts = matched$pairs_in_districts[1],
+  metered_kept = nrow(matched),
+  physical_dropped = matched[, sum(lift_share > 1, na.rm = TRUE)],
+  wells_in_districts = wells[district %in% c("Upper Republican", "Middle Republican"), .N],
+  share_wells_quarter = wells[district %in% c("Upper Republican", "Middle Republican"), mean(!is.na(subsec))]
+), here::here("Results/energy_match_counts.rds"))
+
+#--- shared file: arbitrary well number in random order, no identifiers or locations ---#
+set.seed(20261112)
+
+matched[is.na(lift_share) | lift_share <= 1, ] %>%
+  .[data.table(wellid = sample(unique(wellid)))[, well := .I], on = "wellid"] %>%
+  .[order(well, year), .(well, district, year, acres, volaf, kwh)] %>%
+  fwrite(here::here("Results/energy_water_deidentified.csv"))
+
+cat("Rebuilt file identical to the shared file:",
+    identical(readLines(here::here("Results/energy_water_deidentified.csv")), readLines(here::here("Data/energy_water_deidentified.csv"))), "\n")
+
+#--- what the error depends on: depth to water and the electrical load (hp, in horsepower) are not in the shared file,
+#    so only aggregated results are saved. Records with a ratio of estimated to metered pumping below 1/3 or above 3
+#    (one coefficient per district) are left out, as in the next section. ---#
+by_well <-
+  matched[is.na(lift_share) | lift_share <= 1, ] %>%
+  .[, w_per_kwh := volaf * 12 / kwh] %>%
+  .[, ratio0 := (1 / mean(1 / w_per_kwh)) / w_per_kwh, by = district] %>%
+  .[ratio0 >= 1 / 3 & ratio0 <= 3, ] %>%
+  .[, ratio := (1 / mean(1 / w_per_kwh)) / w_per_kwh, by = district] %>%
+  .[, .(ratio = mean(ratio), kwh_per_inch = mean(1 / w_per_kwh), inches = mean(volaf * 12 / acres), acres = mean(acres), hp = mean(hp), pwl = pwl[1]), by = .(wellid, district)]
+
+#--- wells with a recorded pumping water level, a recorded electrical load and a ratio between 0.5 and 2 ---#
+core <- by_well[is.finite(pwl) & pwl > 0 & hp > 0 & ratio > 0.5 & ratio < 2, ]
+r2 <- \(f) summary(lm(f, data = core))$r.squared
+lift_fit <- lm(kwh_per_inch ~ pwl, data = core)
+
+energy_determinants <- list(
+  n_wells = nrow(core),
+  rank_cor_pwl = by_well[is.finite(pwl) & pwl > 0, cor(ratio, pwl, method = "spearman")],
+  rank_cor_hp = by_well[hp > 0, cor(ratio, hp, method = "spearman")],
+  r2_pwl = r2(log(ratio) ~ log(pwl)),
+  r2_pwl_hp = r2(log(ratio) ~ log(pwl) + log(hp)),
+  #--- metered water applied is left out: it is part of the ratio and is what the estimate replaces ---#
+  r2_more = r2(log(ratio) ~ log(pwl) + log(hp) + log(acres) + district),
+  kwh_per_inch_at_zero_depth = unname(coef(lift_fit)[1]),
+  kwh_per_inch_per_foot = unname(coef(lift_fit)[2])
+)
+
+saveRDS(energy_determinants, here::here("Results/energy_determinants.rds"))
+
+str(energy_determinants)
+```
+
+## Read the shared file
+
+`well`: arbitrary well number; `district`: Natural Resources District; `acres`: irrigated acres; `volaf`: metered pumping (acre-feet); `kwh`: electricity use of the pump (kWh).
+
+Well-years whose ratio of estimated to metered pumping is below 1/3 or above 3 are left out. They are records in which, for example, a well reports a fraction of an inch of water for a season but tens of thousands of kWh, and are taken to be faulty.
+
+```{r}
+all_years <-
+  fread(here::here("Data/energy_water_deidentified.csv")) %>%
+  #--- water pumped per unit of electricity (acre-inches per kWh) and applied depth (inches) ---#
+  .[, w_per_kwh := volaf * 12 / kwh] %>%
+  .[, inches := volaf * 12 / acres]
+
+we <-
+  copy(all_years) %>%
+  .[, ratio0 := (1 / mean(1 / w_per_kwh)) / w_per_kwh, by = district] %>%
+  .[ratio0 >= 1 / 3 & ratio0 <= 3, ] %>%
+  .[, ratio0 := NULL]
+
+n_implausible <- nrow(all_years) - nrow(we)
+cat("well-years left out as faulty:", n_implausible, "\n")
+```
+
+## Estimate and its ratio to metered pumping
+
+The estimate is electricity use times one coefficient per district. The coefficient is chosen so that the ratio of estimated to metered pumping averages 1 across well-years in the district, which is the sense of "unbiased" used in the simulations.
+
+```{r}
+we[, coef := 1 / mean(1 / w_per_kwh), by = district]
+we[, ratio := coef / w_per_kwh]
+stopifnot(we[, abs(mean(ratio) - 1), by = district][, max(V1)] < 1e-12)
+
+#--- well averages over years ---#
+well_avg <- we[, .(ratio = mean(ratio), inches = mean(inches), years = .N), by = .(well, district)]
+```
+
+## Numbers quoted in Supplementary Note 3
+
+Size of the error, its shape, its relation to water applied, the two senses of an unbiased estimate, and proportionality within a well.
+
+```{r}
+#--- a coefficient equal to the average water pumped per kWh makes metered / estimated pumping average 1 instead ---#
+alt <- copy(we)[, coef_alt := mean(w_per_kwh), by = district][, ratio_alt := coef_alt / w_per_kwh]
+
+well_avg[, fifth := cut(inches, quantile(inches, 0:5 / 5), include.lowest = TRUE, labels = FALSE)]
+
+core_wells <- well_avg[ratio > 0.5 & ratio < 2, ]
+
+#--- ratio and water applied from different years, so that the same metered volume is not on both sides ---#
+split_years <- merge(
+  we[year %in% c(2007, 2009, 2011), .(ratio_odd = mean(ratio)), by = well],
+  we[year %in% c(2010, 2012), .(inches_even = mean(inches)), by = well],
+  by = "well"
+)
+
+#--- log electricity and log water as deviations from each well's own mean (core wells with three or more years) ---#
+within_well <-
+  we[well %in% core_wells[years >= 3, well], ] %>%
+  .[, `:=`(lk = log(kwh) - mean(log(kwh)), lv = log(volaf) - mean(log(volaf))), by = well]
+
+energy_check <- list(
+  n_wells = nrow(well_avg),
+  n_obs = nrow(we),
+  n_implausible = n_implausible,
+  years = range(we$year),
+  mad_well = well_avg[, mean(abs(ratio - 1))],
+  median_ad_well = well_avg[, median(abs(ratio - 1))],
+  #--- the same for individual well-years ---#
+  mad_obs = we[, mean(abs(ratio - 1))],
+  p05_well = well_avg[, quantile(ratio, 0.05)],
+  p95_well = well_avg[, quantile(ratio, 0.95)],
+  n_wells_above_2 = well_avg[, sum(ratio > 2)],
+  rank_cor_inches = well_avg[, cor(ratio, inches, method = "spearman")],
+  rank_cor_inches_split = split_years[, cor(ratio_odd, inches_even, method = "spearman")],
+  #--- medians, because a few wells have very high ratios ---#
+  ratio_lowest_fifth = well_avg[fifth == 1, median(ratio)],
+  ratio_highest_fifth = well_avg[fifth == 5, median(ratio)],
+  alt_mean_ratio = alt[, mean(ratio_alt)],
+  alt_total_ratio = alt[, sum(kwh * coef_alt) / sum(volaf * 12)],
+  #--- district averages of the ratio by year ---#
+  year_mean_min = we[, mean(ratio), by = .(district, year)][, min(V1)],
+  year_mean_max = we[, mean(ratio), by = .(district, year)][, max(V1)],
+  #--- shape of the distribution across wells; "core" wells have a ratio between 0.5 and 2 ---#
+  n_wells_outside_core = well_avg[, sum(ratio <= 0.5 | ratio >= 2)],
+  max_well_ratio = well_avg[, max(ratio)],
+  skew_log_all = well_avg[, mean((log(ratio) - mean(log(ratio)))^3) / sd(log(ratio))^3],
+  kurt_log_all = well_avg[, mean((log(ratio) - mean(log(ratio)))^4) / sd(log(ratio))^4],
+  sd_log_core = core_wells[, sd(log(ratio))],
+  skew_log_core = core_wells[, mean((log(ratio) - mean(log(ratio)))^3) / sd(log(ratio))^3],
+  kurt_log_core = core_wells[, mean((log(ratio) - mean(log(ratio)))^4) / sd(log(ratio))^4],
+  share_within_10 = well_avg[, mean(abs(ratio - 1) < 0.10)],
+  share_within_25 = well_avg[, mean(abs(ratio - 1) < 0.25)],
+  share_beyond_50 = well_avg[, mean(abs(ratio - 1) > 0.50)],
+  #--- a uniform distribution with the same average absolute error has no well further than twice that error from 1 ---#
+  share_beyond_uniform = well_avg[, mean(abs(ratio - 1) > 2 * mean(abs(ratio - 1)))],
+  #--- within a well: percent change in electricity for a 1% change in water pumped ---#
+  n_wells_within = within_well[, uniqueN(well)],
+  elasticity_within = unname(coef(lm(lk ~ lv, data = within_well))[2]),
+  elasticity_within_year = unname(coef(lm(lk ~ lv + factor(year), data = within_well))[2])
+)
+
+saveRDS(energy_check, here::here("Results/energy_check.rds"))
+
+str(energy_check)
+```
+
+Stability of a well's ratio over time. Pairs made on location can include a well and an account that are not the same pump; how that affects these measures is not known.
+
+```{r}
+multi <- we[well %in% well_avg[years >= 2, well], ]
+
+#--- one minus the ratio of the pooled within-well variance of log(ratio) to its total variance ---#
+between_share <- function(x) 1 - x[, .(v = var(log(ratio)), n = .N), by = well][n > 1, weighted.mean(v, n - 1)] / x[, var(log(ratio))]
+
+#--- each well's ratio in one year and in the next (2009 to 2012) ---#
+consecutive <- we[, .(well, year = year - 1, ratio_next = ratio)][we, on = .(well, year), nomatch = NULL][, .(well, year, ratio, ratio_next)]
+by_pair <- consecutive[, .(rank_cor = cor(ratio, ratio_next, method = "spearman")), by = year]
+
+energy_stability <- list(
+  n_wells = multi[, uniqueN(well)],
+  between = between_share(multi),
+  rank_cor = range(by_pair$rank_cor),
+  median_change = consecutive[, median(abs(log(ratio_next / ratio)))],
+  #--- 2007 and 2009, two years apart because 2008 is missing ---#
+  rank_cor_2007_2009 = merge(we[year == 2007, .(well, r7 = ratio)], we[year == 2009, .(well, r9 = ratio)], by = "well")[, cor(r7, r9, method = "spearman")]
+)
+
+saveRDS(energy_stability, here::here("Results/energy_stability.rds"))
+
+str(energy_stability)
+```
+
+## Supplementary Fig. 6
+
+```{r}
+g_energy_ratio_dist <-
+  ggplot(well_avg) +
+  geom_histogram(aes(x = ratio), binwidth = 0.05, boundary = 1, fill = "grey70", color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  #--- the few wells with a ratio above 2 are not shown; their number is given in the caption ---#
+  coord_cartesian(xlim = c(0.4, 2)) +
+  xlab("Estimated / metered pumping") +
+  ylab("Number of wells") +
+  theme_bw(base_size = 9) +
+  theme(panel.grid.minor = element_blank())
+
+ggsave(here::here("Figures/g_energy_ratio_dist.png"), g_energy_ratio_dist, height = 3.2, width = 3.4, dpi = 400)
+
+#--- wells grouped into tenths by applied depth: median ratio and its interquartile range ---#
+by_inches <-
+  copy(well_avg) %>%
+  .[, tenth := cut(inches, quantile(inches, 0:10 / 10), include.lowest = TRUE, labels = FALSE)] %>%
+  .[, .(inches = mean(inches), ratio = median(ratio), q25 = quantile(ratio, 0.25), q75 = quantile(ratio, 0.75)), by = tenth]
+
+g_energy_ratio_use <-
+  ggplot(by_inches) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_linerange(aes(x = inches, ymin = q25, ymax = q75), color = "grey50") +
+  geom_point(aes(x = inches, y = ratio), size = 2) +
+  xlab("Metered water applied (inches)") +
+  ylab("Estimated / metered pumping") +
+  theme_bw(base_size = 9) +
+  theme(panel.grid.minor = element_blank())
+
+ggsave(here::here("Figures/g_energy_ratio_use.png"), g_energy_ratio_use, height = 3.2, width = 3.4, dpi = 400)
+
+g_energy_ratio_persist <-
+  ggplot(consecutive) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(aes(x = ratio, y = ratio_next), size = 0.3, alpha = 0.2) +
+  #--- a few points below 0.4 or above 2 on either axis are not shown ---#
+  coord_equal(xlim = c(0.4, 2), ylim = c(0.4, 2)) +
+  xlab("Estimated / metered pumping in a year") +
+  ylab("Same ratio in the following year") +
+  theme_bw(base_size = 9) +
+  theme(panel.grid.minor = element_blank())
+
+ggsave(here::here("Figures/g_energy_ratio_persist.png"), g_energy_ratio_persist, height = 3.2, width = 3.4, dpi = 400)
+```

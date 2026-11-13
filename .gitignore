@@ -1,0 +1,12 @@
+Data/downloads
+Data/raw/
+Results/
+Figures/
+Code/*.html
+Code/*_files/
+.Rproj.user/
+.Rhistory
+.quarto/
+.DS_Store
+*.rmarkdown
+*.part

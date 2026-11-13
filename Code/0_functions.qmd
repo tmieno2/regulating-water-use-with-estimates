@@ -1,0 +1,254 @@
+---
+title: "Prices, production functions and simulation functions"
+---
+
+The other files load the code in this file with `knitr::purl()`. Rendering this file also runs the checks in the last section, which are not loaded by the other files.
+
+## Packages
+
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyr)
+```
+
+## Prices and costs
+
+```{r}
+corn_price <- 6 # $ per bushel
+e_price <- 0.15 # $ per kWh
+w_price <- e_price * 500 / 12 # $ per acre-inch: 500 kWh to pump one acre-foot, 12 inches per foot
+other_cost <- 800 # $ per acre
+```
+
+## Farmers
+
+Yield is $y = y_{max}(1 - \alpha e^{-\beta w})$, where $y_{max}$ is maximum yield ($\phi$ in the paper), and profit is $\pi = P_c y - P_w w - C$. Given a farmer's profit-maximizing water use (`opt_w`), $y_{max}$ and $\alpha$, $\beta$ is chosen so that `opt_w` is indeed the profit-maximizing water use.
+
+```{r}
+#--- profit and the water use at which the marginal profit of water equals a price (never above the unconstrained
+#    use), for a farmer f with ymax, alpha and beta ---#
+profit_of <- function(w, f) corn_price * f$ymax * (1 - f$alpha * exp(-f$beta * w)) - w_price * w - other_cost
+use_at_price <- function(price, f) pmax(0, log(corn_price * f$ymax * f$alpha * f$beta / (w_price + price)) / f$beta)
+
+#--- beta that makes w the profit-maximizing water use, given c = Pc * ymax * alpha / Pw.
+#    w = log(c * beta) / beta has two roots in beta. Take the larger one (beta > e / c);
+#    the smaller one gives a nearly flat yield curve. ---#
+solve_beta <- function(w, c) uniroot(\(b) log(c * b) / b - w, c(exp(1) / c, 100), tol = 1e-12)$root
+
+gen_farmer_data <- function(par_set, num_farmers) {
+  data.table(
+    opt_w = par_set$opt_w,
+    farmer = 1:num_farmers,
+    ymax = runif(num_farmers, min = par_set$ymax_min, max = par_set$ymax_max),
+    alpha = runif(num_farmers, min = par_set$alpha_min, max = par_set$alpha_max)
+  ) %>%
+    .[, beta := mapply(solve_beta, opt_w, corn_price * ymax * alpha / w_price)] %>%
+    .[, opt_w_true := -log(w_price / (corn_price * ymax * alpha * beta)) / beta]
+}
+
+#--- yield, profit and marginal profit of water at the water use w of each row ---#
+add_profit <- function(d) {
+  d %>%
+    .[, yield := ymax * (1 - alpha * exp(-beta * w))] %>%
+    .[, w_cost := w_price * w] %>%
+    .[, profit := corn_price * yield - w_cost - other_cost] %>%
+    .[, marginal_cost_w := w_price] %>%
+    .[, marginal_prod_w := ymax * alpha * beta * exp(-beta * w)] %>%
+    .[, marginal_profit_w := marginal_prod_w * corn_price - marginal_cost_w]
+}
+
+#--- each farmer on a grid of water use from 0 to 1.1 times its profit-maximizing use ---#
+gen_prod_data <- function(farmer_data, w_resolution = 0.01) {
+  w_seq_data <-
+    rowwise(farmer_data) %>%
+    dplyr::mutate(w = list(seq(0, max(opt_w) * 1.1, by = w_resolution))) %>%
+    dplyr::select(farmer, w) %>%
+    unnest(cols = c(w)) %>%
+    data.table()
+
+  add_profit(farmer_data[w_seq_data, on = "farmer"])
+}
+```
+
+## Effective water limits under a quota on estimated use
+
+`w_lim` is a farmer's effective limit on water use. With `cor = "0"`, the ratio of estimated to actual use ($\eta$) is uniform on $[1 - u_{dev}, 1 + u_{dev}]$ and independent of water demand, so estimates are unbiased ($E[\eta] = 1$) and a uniform quota of `target_w` on estimated use lets a farmer use `target_w / eta`. With `cor = "+"`, the limit before the random error rises in proportion to the farmer's unconstrained water use; with `cor = "-"`, it falls linearly with it.
+
+```{r}
+make_quota_data <- function(farmer_data, target_w, u_dev, cor, num_it = 100) {
+  mean_opt_w <- farmer_data[, mean(opt_w)]
+
+  if (cor == "+") {
+    quota_data <- lapply(1:num_it, \(x) {
+      copy(farmer_data)[, .(farmer, opt_w)] %>%
+        .[, dev_from_mean := (opt_w - mean(opt_w)) / mean_opt_w * target_w] %>%
+        .[, w_lim := (target_w + dev_from_mean) / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
+    })
+  } else if (cor == "-") {
+    quota_data <- lapply(1:num_it, \(x) {
+      copy(farmer_data)[, .(farmer, opt_w)] %>%
+        .[, dev_from_mean := (opt_w - mean(opt_w)) / mean_opt_w * target_w] %>%
+        .[, w_lim := (target_w - dev_from_mean) / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
+    })
+  } else if (cor == "0") {
+    quota_data <- lapply(1:num_it, \(x) {
+      copy(farmer_data)[, .(farmer)] %>%
+        .[, w_lim := target_w / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
+    })
+  }
+
+  quota_data %>%
+    data.table::rbindlist(idcol = "case") %>%
+    #--- eta: estimated / actual use, so a uniform quota of target_w on estimated use gives target_w / eta = w_lim ---#
+    .[, water_to_proxy := target_w / w_lim] %>%
+    .[, .(farmer, w_lim, water_to_proxy, case)] %>%
+    .[, target_w := target_w]
+}
+```
+
+## Quota and trading outcomes
+
+`run_analysis()` loops over parameter sets in parallel. Each parameter set gets its own random seed, drawn before the parallel loop, so the results do not depend on the number of cores.
+
+```{r}
+run_analysis <- function(parameter_sets, farmer_data, prod_data, num_it = 1, num_cores = NULL) {
+  seeds <- sample.int(.Machine$integer.max, nrow(parameter_sets))
+
+  parallel::mclapply(
+    1:nrow(parameter_sets),
+    \(set) {
+      print(paste0("working on parameter set ", set, "/", nrow(parameter_sets)))
+      set.seed(seeds[set])
+
+      target_w <- parameter_sets[set, target_w]
+      u_dev <- parameter_sets[set, u_dev]
+      dir_cor <- parameter_sets[set, dir_cor]
+
+      quota_data <-
+        make_quota_data(farmer_data, target_w = target_w, u_dev = u_dev, cor = dir_cor, num_it = num_it)
+
+      run_analysis_by_case(prod_data = prod_data, quota_data = quota_data) %>%
+        .[, target_w := target_w] %>%
+        .[, dir_cor := dir_cor] %>%
+        .[, u_dev := u_dev]
+    },
+    mc.cores = ifelse(is.null(num_cores), max(2, parallel::detectCores() - 5), num_cores),
+    mc.preschedule = FALSE
+  ) %>%
+    rbindlist()
+}
+
+#--- quota and trading outcomes for each draw of the effective limits (case) ---#
+# Each farmer's water grid in prod_data is sorted, so the grid point closest to a target is found by
+# binary search (nearest()).
+run_analysis_by_case <- function(prod_data, quota_data) {
+  farmers <- unique(prod_data$farmer)
+  rows <- split(seq_len(nrow(prod_data)), factor(prod_data$farmer, levels = farmers))
+  opt_w <- prod_data$opt_w[vapply(rows, `[`, 1L, 1L)]
+  w_all <- prod_data$w
+  profit_all <- prod_data$profit
+  row_farmer <- match(prod_data$farmer, farmers)
+
+  lapply(
+    unique(quota_data$case),
+    \(x) {
+      q <- quota_data[case == x, ][match(farmers, farmer)]
+
+      #--- quota: water use is the limit, or the unconstrained use if that is lower ---#
+      alloc_limit <- ifelse(q$w_lim > opt_w, opt_w, q$w_lim)
+      k <- mapply(\(r, lim) r[nearest(w_all[r], lim)], rows, alloc_limit)
+
+      proxy_quota_res <-
+        data.table(
+          farmer = farmers, w_lim = q$w_lim, case = q$case, opt_w = opt_w,
+          proxy = w_all[k] * q$water_to_proxy, w = w_all[k], profit = profit_all[k], target_w = q$target_w
+        ) %>%
+        .[, instrument_type := "Quota"]
+
+      #--- trading: each farmer equates its marginal profit of estimated use with the permit price ---#
+      mpp_all <- prod_data$marginal_profit_w / q$water_to_proxy[row_farmer]
+      prices <- unique(quantile(mpp_all[mpp_all > 0], prob = seq(0, 1, length = 100)))
+      k <- matrix(vapply(rows, \(r) r[nearest(mpp_all[r], prices)], integer(length(prices))), nrow = length(prices))
+
+      #--- the permit price that gives the target average water use (lowest price if tied) ---#
+      mean_w <-
+        data.table(permit_price = rep(prices, each = length(farmers)), w = w_all[as.vector(t(k))]) %>%
+        .[, mean_w := mean(w), by = permit_price] %>%
+        .[seq(1, by = length(farmers), length.out = length(prices)), mean_w]
+      s <- which(abs(mean_w - q$target_w[1]) == min(abs(mean_w - q$target_w[1])))[1]
+
+      proxy_trading_res <-
+        data.table(
+          farmer = farmers, w_lim = q$w_lim, case = q$case, opt_w = opt_w,
+          proxy = w_all[k[s, ]] * q$water_to_proxy, w = w_all[k[s, ]], profit = profit_all[k[s, ]],
+          target_w = q$target_w, permit_price = prices[s]
+        ) %>%
+        .[order(farmer), ] %>%
+        #--- every farmer holds the same allowance, so that total estimated use equals the total allowance ---#
+        .[, permit_sales := (mean(proxy) - proxy) * permit_price] %>%
+        .[, profit_prod := profit] %>%
+        .[, profit := profit + permit_sales] %>%
+        .[, instrument_type := "Trading"]
+
+      rbind(proxy_quota_res, proxy_trading_res, fill = TRUE)
+    }
+  ) %>%
+    rbindlist()
+}
+
+#--- index of the element of sorted (either direction) v closest to each x: same as which.min(abs(v - x)) ---#
+nearest <- function(v, x) {
+  if (v[1] > v[length(v)]) {
+    v <- -v
+    x <- -x
+  }
+  i <- findInterval(x, v)
+  lo <- pmax(i, 1L)
+  hi <- pmin(i + 1L, length(v))
+  k <- ifelse(abs(v[hi] - x) < abs(v[lo] - x), hi, lo)
+  match(v[k], v) # first of a run of equal values, as which.min picks
+}
+```
+
+## Utility
+
+```{r}
+#--- every row of data_1 combined with every row of data_2 ---#
+expand_grid_df <- function(data_1, data_2) {
+  data_1_ex <- data.table(data_1[rep(1:nrow(data_1), each = nrow(data_2)), ])[, rowid := 1:.N]
+  data_2_ex <- data.table(data_2[rep(1:nrow(data_2), nrow(data_1)), ])[, rowid := 1:.N]
+  data_1_ex[data_2_ex, on = "rowid"][, rowid := NULL]
+}
+```
+
+## Checks
+
+```{r}
+#| purl: false
+#--- beta: the right root, and opt_w is the profit-maximizing water use ---#
+set.seed(328954)
+fd <- gen_farmer_data(
+  list(opt_w = rlnorm(300, log(11.266), 0.4), ymax_min = 210, ymax_max = 250, alpha_min = 0.6, alpha_max = 0.8),
+  300
+)
+stopifnot(fd[, all(beta > exp(1) * w_price / (corn_price * ymax * alpha))])
+stopifnot(fd[, max(abs(opt_w_true - opt_w))] < 1e-6)
+
+#--- trading on estimated use: permit sales net to zero, and with identical farmers a tighter effective
+#    limit (higher eta) means less water after trading ---#
+set.seed(1)
+fd0 <- gen_farmer_data(list(opt_w = 12, ymax_min = 230, ymax_max = 230, alpha_min = 0.7, alpha_max = 0.7), 50)
+qd <- make_quota_data(fd0, target_w = 8, u_dev = 0.5, cor = "0", num_it = 1)
+stopifnot(qd[, all(abs(target_w / water_to_proxy - w_lim) < 1e-9)])
+res <- run_analysis_by_case(gen_prod_data(fd0), qd)[instrument_type == "Trading"][qd, on = "farmer"]
+stopifnot(abs(res[, sum(permit_sales)]) < 1e-6)
+stopifnot(res[, cor(i.w_lim, w)] > 0.9)
+
+#--- nearest() picks the same element as which.min(abs(v - x)) ---#
+v <- c(0, 0.5, 0.5, 1.2, 3)
+stopifnot(identical(nearest(v, c(-1, 0.2, 0.5, 0.9, 10)), sapply(c(-1, 0.2, 0.5, 0.9, 10), \(x) which.min(abs(v - x)))))
+stopifnot(identical(nearest(rev(v), 0.9), which.min(abs(rev(v) - 0.9))))
+
+cat("all checks passed\n")
+```

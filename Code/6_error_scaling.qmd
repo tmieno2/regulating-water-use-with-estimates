@@ -1,0 +1,141 @@
+---
+title: "How the error of estimated water use scales with water use (Supplementary Note 5)"
+---
+
+This file asks whether the error of an estimate of water use is a fixed amount of water, whatever the use (an additive error), or grows in proportion to use (a multiplicative error, as in the simulations). It uses three public data sets that pair satellite-based estimates with metered or reported use, and the electricity-based records of `Code/5_energy_estimates.qmd`.
+
++ Kansas, Sheridan 6 Local Enhanced Management Area, 2016 to 2020 (Zipper et al. 2024): estimates of growing-season irrigation for fields from the OpenET ensemble (the average of several satellite-based models of evapotranspiration), summed over the fields of each water-right group (water rights that share wells or irrigated land), against the water use reported for the group. Data and code: HydroShare, https://doi.org/10.4211/hs.36fa9e69ff0849bb941b9ab2835b8a6e (CC BY-SA 4.0). The farmers' own field records used in that study are not public.
++ Diamond Valley, Nevada, and Harney Basin, Oregon (Ott et al. 2024): OpenET ensemble net evapotranspiration (evapotranspiration less effective precipitation) against metered pumping for fields. Data and code: https://github.com/montimaj/OpenET-GW (CC0 1.0), commit `edc587c`.
++ Nebraska, Upper and Middle Republican Natural Resources Districts: electricity use against metered pumping for wells (`Data/energy_water_deidentified.csv`).
+
+Downloads are saved in `Data/downloads/` and are not downloaded again if present.
+
+```{r}
+#| include: false
+library(data.table)
+library(dplyr)
+dl <- here::here("Data/downloads")
+dir.create(dl, showWarnings = FALSE, recursive = TRUE)
+dir.create(here::here("Results"), showWarnings = FALSE)
+```
+
+## Download the public data
+
+```{r}
+options(timeout = 3600)
+
+ott_url <- "https://raw.githubusercontent.com/montimaj/OpenET-GW/edc587c6a6ac05de7b0d05b53c7487f5a8f3cdfe/scripts/joined_data/"
+for (f in c("dv_joined_et_pumping_data_all.csv", "hb_joined_et_pumping_data_all.csv")) {
+  if (!file.exists(file.path(dl, f))) {
+    download.file(paste0(ott_url, f), file.path(dl, paste0(f, ".part")), mode = "wb")
+    file.rename(file.path(dl, paste0(f, ".part")), file.path(dl, f))
+  }
+}
+
+#--- 338 MB; only three files are extracted ---#
+zipper_files <- c(
+  "SD-6_MapWaterConservation/data/WRGs_UseByWRG.csv",
+  "SD-6_MapWaterConservation/data/WRGs_WRGbyField.csv",
+  "data/OpenET/Monthly_2016-2021_20221006extraction/OpenET_FieldIrrigation_GrowingSeason.csv"
+)
+if (!all(file.exists(file.path(dl, basename(zipper_files))))) {
+  zip_file <- file.path(dl, "ZipperEtAl_IrrigationOpenET_DataCode.zip")
+  if (!file.exists(zip_file)) {
+    #--- download to a temporary name first, so that an interrupted download is not mistaken for a complete one ---#
+    download.file("https://www.hydroshare.org/resource/36fa9e69ff0849bb941b9ab2835b8a6e/data/contents/ZipperEtAl_IrrigationOpenET_DataCode.zip", paste0(zip_file, ".part"), mode = "wb")
+    file.rename(paste0(zip_file, ".part"), zip_file)
+  }
+  unzip(zip_file, files = paste0("ZipperEtAl_IrrigationOpenET_Data+Code/", zipper_files), exdir = dl, junkpaths = TRUE)
+}
+```
+
+## Pairs of metered and estimated use
+
+Each data set becomes a table with `metered` and `estimate`, both in millimeters of water per unit area. In every data set, records whose ratio of estimated to metered use is below 1/3 or above 3 are left out as faulty, as in Supplementary Note 3.
+
+```{r}
+keep_plausible <- \(x) x[estimate > 0 & metered > 0 & estimate / metered >= 1 / 3 & estimate / metered <= 3, ]
+
+#--- Kansas: water-right groups more than half inside the management area, years up to 2020, as in Zipper et al. (2024).
+#    Groups whose satellite-mapped irrigated area differs from the reported irrigated area by more than 10% are left out. ---#
+use <-
+  fread(file.path(dl, "WRGs_UseByWRG.csv")) %>%
+  .[Year <= 2020 & is.finite(LEMA_irrFieldArea_fraction) & LEMA_irrFieldArea_fraction > 0.5, ] %>%
+  .[, irr_area_m2 := LEMA_irrFieldArea_m2 + notLEMA_irrFieldArea_m2] %>%
+  .[abs(irr_area_m2 - WRGirrAreaReported_m2) / WRGirrAreaReported_m2 <= 0.1, ]
+
+field_est <-
+  fread(file.path(dl, "OpenET_FieldIrrigation_GrowingSeason.csv"))[Algorithm == "ensemble", ] %>%
+  fread(file.path(dl, "WRGs_WRGbyField.csv"))[., on = "UID", nomatch = NULL] %>%
+  .[, .(est_m3 = sum(FieldIrrigationPeff_m3)), by = .(WR_GROUP, Year)]
+
+kansas <-
+  use[field_est, on = .(WR_GROUP, Year), nomatch = NULL] %>%
+  .[is.finite(WRGirrigationTotal_m3), .(
+    metered = 1000 * WRGirrigationTotal_m3 / WRGirrAreaReported_m2,
+    estimate = 1000 * est_m3 / irr_area_m2
+  )] %>%
+  keep_plausible()
+
+#--- Nevada and Oregon: fields ---#
+ott <- function(f) {
+  fread(file.path(dl, f)) %>%
+    .[, .(metered = pumping_mm, estimate = annual_net_et_mm)] %>%
+    keep_plausible()
+}
+nevada <- ott("dv_joined_et_pumping_data_all.csv")
+oregon <- ott("hb_joined_et_pumping_data_all.csv")
+```
+
+Nebraska: well-years for 2007 and 2009 to 2012, as in Supplementary Note 3. The estimate is calibrated by district, so the screen is applied after a first calibration within each district.
+
+```{r}
+nebraska <-
+  fread(here::here("Data/energy_water_deidentified.csv")) %>%
+  .[, .(district, metered = 25.4 * volaf * 12 / acres, raw = kwh / acres)] %>%
+  .[, estimate := raw / mean(raw / metered), by = district] %>%
+  keep_plausible() %>%
+  .[, estimate := raw / mean(raw / metered), by = district] %>%
+  .[, .(metered, estimate)]
+```
+
+## How the error scales with use (Supplementary Table 5)
+
+The estimate is scaled so that the ratio of estimated to metered use averages 1, the sense of "unbiased" used in the simulations. The error is then estimate minus metered use. Its growth with use is summarized by the slope of the logarithm of the absolute error on the logarithm of use: 1 means the error grows in proportion to use (multiplicative), 0 that it does not grow (additive). Measuring use by either number alone can distort the slope, because an observation can rank low or high partly because of the error itself. The slope is therefore reported against metered use, against the estimate, and against the average of the two, and observations are grouped by the average of the two.
+
+```{r}
+scaling <- function(x, data_set, estimate_kind, unit) {
+  x <- copy(x)[, estimate := estimate / mean(estimate / metered)][, error := estimate - metered][, level := (metered + estimate) / 2]
+  slope <- \(v) unname(coef(lm(log(abs(error)) ~ log(v), data = x[abs(error) > 0, ]))[2])
+  x[, fifth := cut(level, quantile(level, 0:5 / 5), include.lowest = TRUE, labels = FALSE)]
+  by_fifth <- x[, .(use_mm = mean(level), abs_error_mm = mean(abs(error)), abs_error_pct = mean(abs(error) / metered)), by = fifth][order(fifth)]
+  data.table(
+    data_set = data_set,
+    estimate_kind = estimate_kind,
+    unit = unit,
+    n = nrow(x),
+    use_p05 = quantile(x$metered, 0.05),
+    use_p95 = quantile(x$metered, 0.95),
+    use_low = by_fifth[fifth == 1, use_mm],
+    use_high = by_fifth[fifth == 5, use_mm],
+    error_mm_low = by_fifth[fifth == 1, abs_error_mm],
+    error_mm_high = by_fifth[fifth == 5, abs_error_mm],
+    error_pct_low = by_fifth[fifth == 1, abs_error_pct],
+    error_pct_high = by_fifth[fifth == 5, abs_error_pct],
+    slope_metered = slope(x$metered[abs(x$error) > 0]),
+    slope_estimate = slope(x$estimate[abs(x$error) > 0]),
+    slope_average = slope(x$level[abs(x$error) > 0])
+  )
+}
+
+error_scaling <- rbind(
+  scaling(kansas, "Kansas", "Satellite (OpenET ensemble)", "Water-right group and year"),
+  scaling(nevada, "Nevada", "Satellite (OpenET ensemble)", "Field and year"),
+  scaling(oregon, "Oregon", "Satellite (OpenET ensemble)", "Field and year"),
+  scaling(nebraska, "Nebraska", "Electricity use", "Well and year")
+)
+
+saveRDS(error_scaling, here::here("Results/error_scaling.rds"))
+
+error_scaling[, lapply(.SD, \(v) if (is.numeric(v)) round(v, 2) else v)]
+```
