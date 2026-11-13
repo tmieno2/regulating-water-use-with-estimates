@@ -46,4 +46,4 @@ R 4.5.0 and Quarto 1.7.32, with the R packages data.table 1.17.8, dplyr 1.1.4, t
 
 ## License
 
-The code is released under the MIT license (`LICENSE`).
+The code is released under the MIT license (`LICENSE`). The data file `Data/energy_water_deidentified.csv`, built from public records of the Republican River Compact Administration, is released under the Creative Commons Attribution 4.0 International license (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/).
