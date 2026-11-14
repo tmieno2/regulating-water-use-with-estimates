@@ -75,30 +75,14 @@ gen_prod_data <- function(farmer_data, w_resolution = 0.01) {
 
 ## Effective water limits under a quota on estimated use
 
-`w_lim` is a farmer's effective limit on water use. With `cor = "0"`, the ratio of estimated to actual use ($\eta$) is uniform on $[1 - u_{dev}, 1 + u_{dev}]$ and independent of water demand, so estimates are unbiased ($E[\eta] = 1$) and a uniform quota of `target_w` on estimated use lets a farmer use `target_w / eta`. With `cor = "+"`, the limit before the random error rises in proportion to the farmer's unconstrained water use; with `cor = "-"`, it falls linearly with it.
+`w_lim` is a farmer's effective limit on water use. The ratio of estimated to actual use ($\eta$) is uniform on $[1 - u_{dev}, 1 + u_{dev}]$ and independent of water demand, so estimates are unbiased ($E[\eta] = 1$) and a uniform quota of `target_w` on estimated use lets a farmer use `target_w / eta`.
 
 ```{r}
-make_quota_data <- function(farmer_data, target_w, u_dev, cor, num_it = 100) {
-  mean_opt_w <- farmer_data[, mean(opt_w)]
-
-  if (cor == "+") {
-    quota_data <- lapply(1:num_it, \(x) {
-      copy(farmer_data)[, .(farmer, opt_w)] %>%
-        .[, dev_from_mean := (opt_w - mean(opt_w)) / mean_opt_w * target_w] %>%
-        .[, w_lim := (target_w + dev_from_mean) / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
-    })
-  } else if (cor == "-") {
-    quota_data <- lapply(1:num_it, \(x) {
-      copy(farmer_data)[, .(farmer, opt_w)] %>%
-        .[, dev_from_mean := (opt_w - mean(opt_w)) / mean_opt_w * target_w] %>%
-        .[, w_lim := (target_w - dev_from_mean) / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
-    })
-  } else if (cor == "0") {
-    quota_data <- lapply(1:num_it, \(x) {
-      copy(farmer_data)[, .(farmer)] %>%
-        .[, w_lim := target_w / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
-    })
-  }
+make_quota_data <- function(farmer_data, target_w, u_dev, num_it = 100) {
+  quota_data <- lapply(1:num_it, \(x) {
+    copy(farmer_data)[, .(farmer)] %>%
+      .[, w_lim := target_w / runif(1, min = 1 - u_dev, max = 1 + u_dev), by = farmer]
+  })
 
   quota_data %>%
     data.table::rbindlist(idcol = "case") %>%
@@ -111,11 +95,11 @@ make_quota_data <- function(farmer_data, target_w, u_dev, cor, num_it = 100) {
 
 ## Quota and trading outcomes
 
-`run_analysis()` loops over parameter sets in parallel. Each parameter set gets its own random seed, drawn before the parallel loop, so the results do not depend on the number of cores.
+`run_analysis()` loops over parameter sets in parallel. Each parameter set gets its own random seed, drawn before the parallel loop (or passed in as `seeds`), so the results do not depend on the number of cores.
 
 ```{r}
-run_analysis <- function(parameter_sets, farmer_data, prod_data, num_it = 1, num_cores = NULL) {
-  seeds <- sample.int(.Machine$integer.max, nrow(parameter_sets))
+run_analysis <- function(parameter_sets, farmer_data, prod_data, num_it = 1, num_cores = NULL, seeds = NULL) {
+  if (is.null(seeds)) seeds <- sample.int(.Machine$integer.max, nrow(parameter_sets))
 
   parallel::mclapply(
     1:nrow(parameter_sets),
@@ -125,14 +109,12 @@ run_analysis <- function(parameter_sets, farmer_data, prod_data, num_it = 1, num
 
       target_w <- parameter_sets[set, target_w]
       u_dev <- parameter_sets[set, u_dev]
-      dir_cor <- parameter_sets[set, dir_cor]
 
       quota_data <-
-        make_quota_data(farmer_data, target_w = target_w, u_dev = u_dev, cor = dir_cor, num_it = num_it)
+        make_quota_data(farmer_data, target_w = target_w, u_dev = u_dev, num_it = num_it)
 
       run_analysis_by_case(prod_data = prod_data, quota_data = quota_data) %>%
         .[, target_w := target_w] %>%
-        .[, dir_cor := dir_cor] %>%
         .[, u_dev := u_dev]
     },
     mc.cores = ifelse(is.null(num_cores), max(2, parallel::detectCores() - 5), num_cores),
@@ -241,7 +223,7 @@ stopifnot(fd[, max(abs(opt_w_true - opt_w))] < 1e-6)
 #    limit (higher eta) means less water after trading ---#
 set.seed(1)
 fd0 <- gen_farmer_data(list(opt_w = 12, ymax_min = 230, ymax_max = 230, alpha_min = 0.7, alpha_max = 0.7), 50)
-qd <- make_quota_data(fd0, target_w = 8, u_dev = 0.5, cor = "0", num_it = 1)
+qd <- make_quota_data(fd0, target_w = 8, u_dev = 0.5, num_it = 1)
 stopifnot(qd[, all(abs(target_w / water_to_proxy - w_lim) < 1e-9)])
 res <- run_analysis_by_case(gen_prod_data(fd0), qd)[instrument_type == "Trading"][qd, on = "farmer"]
 stopifnot(abs(res[, sum(permit_sales)]) < 1e-6)

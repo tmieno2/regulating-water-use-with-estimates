@@ -2,7 +2,7 @@
 title: "Simulation of quotas and trading on water use and on estimated water use"
 ---
 
-This file simulates three populations of 1,000 farmers under four policies: a uniform quota on water use (water quota), a uniform quota on estimated water use (proxy quota), and tradable versions of each. It writes its results to `Results/`. The simulation of the proxy-based policies is the slow step: it runs in parallel and takes about 20 minutes on a computer with 16 cores. `num_cores` below sets the number of cores; fewer cores take longer but use less memory, and the results do not depend on it. On Windows the simulation runs on one core.
+This file simulates three populations of 1,000 farmers under four policies: a uniform quota on water use (water quota), a uniform quota on estimated water use (proxy quota), and tradable versions of each. It writes its results to `Results/`. The simulation of the proxy-based policies is the slow step: it runs in parallel and takes about 15 minutes on a computer with 16 cores. `num_cores` below sets the number of cores; fewer cores take longer but use less memory, and the results do not depend on it. On Windows the simulation runs on one core.
 
 ```{r}
 #| include: false
@@ -57,25 +57,13 @@ saveRDS(populations, here::here("Results/populations.rds"))
 
 + `target_w`: the quota per farmer (inches of water, or of estimated water use).
 + `u_dev`: the error level $h$; the ratio of estimated to actual use is uniform on $[1 - h, 1 + h]$.
-+ `dir_cor`: the relation between the error and water demand: `"0"` unrelated, `"+"` high-demand farmers under-estimated, `"-"` high-demand farmers over-estimated.
-
-The grid includes `u_dev = 0` with `dir_cor` of `"+"` and `"-"`, which the paper does not report. These sets are kept because each parameter set receives its random seed in turn, so removing them would change the random draws, and hence slightly change the results, of every set after them.
-
-```{r}
-par_data <-
-  data.table::CJ(
-    target_w = seq(7, 13, by = 0.25),
-    u_dev = c(0, 0.1, 0.3, 0.5),
-    dir_cor = c("+", "-", "0")
-  )
-```
 
 ## Water quota and water-quota trading
 
-With `u_dev = 0` and `dir_cor = "0"`, every farmer's effective limit is the quota itself, which is a water quota.
+With `u_dev = 0`, every farmer's effective limit is the quota itself, which is a water quota.
 
 ```{r}
-par_sets_w <- par_data[u_dev == 0 & dir_cor == "0", ]
+par_sets_w <- data.table::CJ(target_w = seq(7, 13, by = 0.25), u_dev = 0)
 
 results_w <-
   populations %>%
@@ -87,10 +75,14 @@ results_w <-
 
 ## Proxy quota and proxy-quota trading
 
-Each parameter set is simulated with 100 draws of the errors.
+Each parameter set is simulated with 100 draws of the errors, and each gets its own random seed. The seeds are drawn in turn for 275 slots per population: three for each quota and nonzero error level, and two for an error level of 0. The 75 sets below use the third slot of each nonzero error level. The other slots belonged to cases that versions 1.0 and 1.1 of this code also simulated (errors related to water demand, which `Code/2_calculations.qmd` now computes exactly). Drawing the seeds for all the slots keeps the random draws, and hence every result, the same as in those versions.
 
 ```{r}
-par_sets_p <- par_data[!(u_dev == 0 & dir_cor == "0"), ]
+seed_slots <-
+  data.table::CJ(target_w = seq(7, 13, by = 0.25), u_dev = c(0, 0.1, 0.3, 0.5), slot = 1:3) %>%
+  .[!(u_dev == 0 & slot == 3), ]
+used <- seed_slots[, slot == 3]
+par_sets_p <- seed_slots[used, .(target_w, u_dev)]
 
 set.seed(7845239)
 
@@ -101,7 +93,8 @@ results_p <-
     farmer_data,
     prod_data,
     num_it = 100,
-    num_cores = num_cores
+    num_cores = num_cores,
+    seeds = sample.int(.Machine$integer.max, nrow(seed_slots))[used]
   ))) %>%
   dplyr::select(prod_het, results) %>%
   unnest(cols = c(results)) %>%
@@ -114,7 +107,7 @@ Average profit, water use and estimated water use across farmers and draws, for 
 
 ```{r}
 summarize_results <- function(results, measure) {
-  results[, .(profit = mean(profit), w = mean(w), proxy = mean(proxy)), by = .(target_w, instrument_type, dir_cor, u_dev, prod_het)] %>%
+  results[, .(profit = mean(profit), w = mean(w), proxy = mean(proxy)), by = .(target_w, instrument_type, u_dev, prod_het)] %>%
     .[, measure_type := measure]
 }
 
@@ -135,16 +128,16 @@ prob_ls <- seq(0.01, 0.99, by = 0.01)
 #--- quota: the water quota whose realized use is closest to the proxy quota's, within each population ---#
 quota_match <-
   sum_water_res[instrument_type == "Quota", .(prod_het, target_w_water = target_w, w)][
-    sum_proxy_res[instrument_type == "Quota", .(target_w_proxy = target_w, w, dir_cor, u_dev, prod_het)],
+    sum_proxy_res[instrument_type == "Quota", .(target_w_proxy = target_w, w, u_dev, prod_het)],
     on = .(prod_het, w), roll = "nearest"
   ] %>%
-  unique(by = c("target_w_proxy", "dir_cor", "u_dev", "prod_het"))
+  unique(by = c("target_w_proxy", "u_dev", "prod_het"))
 
 change_quota <-
   results_w[instrument_type == "Quota", .(target_w_water = target_w, profit_water = profit, prod_het, farmer)][
     quota_match[
-      results_p[instrument_type == "Quota", .(target_w_proxy = target_w, profit_proxy = profit, dir_cor, u_dev, prod_het, farmer, case)],
-      on = .(target_w_proxy, dir_cor, u_dev, prod_het)
+      results_p[instrument_type == "Quota", .(target_w_proxy = target_w, profit_proxy = profit, u_dev, prod_het, farmer, case)],
+      on = .(target_w_proxy, u_dev, prod_het)
     ],
     on = .(target_w_water, prod_het, farmer)
   ] %>%
@@ -153,17 +146,17 @@ change_quota <-
 #--- trading: the same cap ---#
 change_trading <-
   results_w[instrument_type == "Trading", .(target_w, profit_water = profit, prod_het, farmer)][
-    results_p[instrument_type == "Trading", .(target_w, profit_proxy = profit, dir_cor, u_dev, prod_het, farmer, case)],
+    results_p[instrument_type == "Trading", .(target_w, profit_proxy = profit, u_dev, prod_het, farmer, case)],
     on = .(target_w, prod_het, farmer)
   ] %>%
   .[, change := profit_proxy - profit_water]
 
-#--- errors unrelated to water demand, at about 8 inches of realized use (quota) or a cap of 8 (trading) ---#
+#--- about 8 inches of realized use (quota) or a target of 8 (trading) ---#
 closest_to_8 <- \(d) d[, dev_w := abs(w - 8)][, .SD[dev_w == min(dev_w)], by = .(prod_het, u_dev)]
 at_8 <-
   rbind(
-    change_trading[dir_cor == "0" & target_w == 8, .(u_dev, prod_het, change)][, instrument_type := "Trading"],
-    closest_to_8(change_quota[dir_cor == "0", ])[, .(u_dev, prod_het, change)][, instrument_type := "Quota"]
+    change_trading[target_w == 8, .(u_dev, prod_het, change)][, instrument_type := "Trading"],
+    closest_to_8(change_quota)[, .(u_dev, prod_het, change)][, instrument_type := "Quota"]
   ) %>%
   .[, prod_het := factor(str_to_title(prod_het), c("Zero", "Medium", "High"))]
 

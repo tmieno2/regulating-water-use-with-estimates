@@ -2,7 +2,7 @@
 title: "Numbers in the text, supplementary calculations and the two-farmer examples"
 ---
 
-This file computes, from the results of `Code/1_simulation.qmd`, the numbers quoted in the text, Supplementary Tables 2 and 3, the calculations of Supplementary Notes 1, 2 and 4, and the two-farmer examples of Figures 1, 3 and 4. It takes about a minute.
+This file computes, from the results of `Code/1_simulation.qmd`, the numbers quoted in the text, Supplementary Tables 2 and 3, the calculations of Supplementary Notes 1, 2 and 4, the exact calculations behind Supplementary Figs. 4 and 5, and the two-farmer examples of Figures 1, 3 and 4. It takes a few minutes.
 
 ```{r}
 #| include: false
@@ -25,10 +25,9 @@ hets <- c("Zero", "Medium", "High")
 at <- function(x, y, x0) approx(x, y, xout = x0, ties = mean)$y
 
 #--- one policy's summary, ordered by realized water use ---#
-# dc: "0" errors unrelated to water demand, "+" high-demand farmers under-estimated, "-" high-demand farmers over-estimated
-pick <- function(instrument, measure, het, u = 0, dc = "0") {
+pick <- function(instrument, measure, het, u = 0) {
   d <- sum_res[instrument_type == instrument & measure_type == measure & prod_het == het, ]
-  if (measure == "Proxy") d <- d[u_dev == u & dir_cor == dc, ]
+  if (measure == "Proxy") d <- d[u_dev == u, ]
   d[order(w), ]
 }
 
@@ -58,20 +57,20 @@ no_limit <-
   .[, prod_het := str_to_title(prod_het)]
 
 loss_table <-
-  CJ(prod_het = hets, u_dev = c(0.1, 0.3, 0.5), dir_cor = c("0", "+", "-"), sorted = FALSE) %>%
+  CJ(prod_het = hets, u_dev = c(0.1, 0.3, 0.5), sorted = FALSE) %>%
   .[,
     {
       wq <- pick("Quota", "Water", prod_het)
-      pq <- pick("Quota", "Proxy", prod_het, u_dev, dir_cor)
+      pq <- pick("Quota", "Proxy", prod_het, u_dev)
       wt <- pick("Trading", "Water", prod_het)
-      pt <- pick("Trading", "Proxy", prod_het, u_dev, dir_cor)
+      pt <- pick("Trading", "Proxy", prod_het, u_dev)
       .(
         profit_water = at(wq$w, wq$profit, 8),
         profit_proxy = at(pq$w, pq$profit, 8),
         extra_cost_trading = at(wt$w, wt$profit, 8) - at(pt$w, pt$profit, 8)
       )
     },
-    by = .(prod_het, u_dev, dir_cor)
+    by = .(prod_het, u_dev)
   ] %>%
   no_limit[., on = "prod_het"] %>%
   .[, extra_cost := profit_water - profit_proxy] %>%
@@ -97,7 +96,7 @@ curvature <- corn_price * f$ymax * f$alpha * f$beta^2 * exp(-f$beta * 8)
 price_8 <- corn_price * f$ymax * f$alpha * f$beta * exp(-f$beta * 8) - w_price
 
 approx_check <-
-  loss_table[prod_het == "Zero" & dir_cor == "0", .(u_dev, quota_simulated = extra_cost, trading_simulated = extra_cost_trading)] %>%
+  loss_table[prod_het == "Zero", .(u_dev, quota_simulated = extra_cost, trading_simulated = extra_cost_trading)] %>%
   .[, var_eta := u_dev^2 / 3] %>%
   .[, quota_formula := 0.5 * curvature * 8^2 * var_eta] %>%
   .[, trading_formula := 0.5 * price_8^2 * var_eta / curvature] %>%
@@ -108,7 +107,31 @@ saveRDS(approx_check, here::here("Results/approx_check.rds"))
 round(approx_check, 3)
 ```
 
-## Realized water use under a proxy quota, two senses of an unbiased estimate (Supplementary Fig. 5)
+The share of the quota's extra cost that remains under trading is approximately the square of the elasticity of water use with respect to the permit price, `price / (curvature * W)`. It depends on how deep the cut is. The simulated share is shown where the simulation covers that level of water use.
+
+```{r}
+approx_by_depth <-
+  CJ(W = c(7, 8, 9, 10, 11), u_dev = c(0.1, 0.3, 0.5)) %>%
+  .[, {
+    a <- corn_price * f$ymax * f$alpha * f$beta * exp(-f$beta * W)
+    elasticity <- (a - w_price) / (a * f$beta * W)
+    wq <- pick("Quota", "Water", "Zero")
+    pq <- pick("Quota", "Proxy", "Zero", u_dev)
+    wt <- pick("Trading", "Water", "Zero")
+    pt <- pick("Trading", "Proxy", "Zero", u_dev)
+    .(
+      elasticity = elasticity,
+      share_formula = elasticity^2,
+      share_simulated = (at(wt$w, wt$profit, W) - at(pt$w, pt$profit, W)) / (at(wq$w, wq$profit, W) - at(pq$w, pq$profit, W))
+    )
+  }, by = .(W, u_dev)]
+
+saveRDS(approx_by_depth, here::here("Results/approx_by_depth.rds"))
+
+rounded(approx_by_depth, 3)
+```
+
+## Realized water use under a proxy quota and under proxy-quota trading, two senses of an unbiased estimate (Supplementary Fig. 5)
 
 Under a quota, a farmer uses the smaller of its unconstrained use and its effective limit, so expected use has a closed form. Definition 1 is the one used in the simulation and reproduces its realized water use.
 
@@ -126,13 +149,29 @@ use_def2 <- function(a, q, h) {
 }
 
 opt_w_list <- setNames(lapply(populations$farmer_data, \(d) d$opt_w), str_to_title(populations$prod_het))
+farmers_of <- \(het) populations[prod_het == tolower(het), farmer_data[[1]]]
+
+#--- realized use under proxy-quota trading with a cap per farmer: each farmer sets pi'(w) / eta equal to the
+#    permit price. Expectations over the ratio use 250 equally likely values (midpoints of equal-probability
+#    intervals); under definition 2, eta is 1 / v with v uniform. If the cap does not bind, the price is zero. ---#
+trading_use <- function(f, h, cap, def) {
+  v <- qunif((seq_len(250) - 0.5) / 250, 1 - h, 1 + h)
+  eta <- rep(if (def == 1) v else 1 / v, times = nrow(f))
+  f_all <- f[rep(seq_len(nrow(f)), each = 250), ]
+  use <- \(r) use_at_price(r * eta, f_all)
+  if (mean(eta * use(0)) <= cap) return(mean(use(0)))
+  r <- uniroot(\(r) mean(eta * use(r)) - cap, c(0, 500), tol = 1e-10)$root
+  mean(use(r))
+}
 
 quota_target_def <-
   CJ(prod_het = hets, u_dev = c(0.1, 0.3, 0.5), target_w = seq(7, 13, by = 0.25), sorted = FALSE) %>%
   .[,
     .(
       w_def1 = mean(use_def1(opt_w_list[[prod_het]], target_w, u_dev)),
-      w_def2 = mean(use_def2(opt_w_list[[prod_het]], target_w, u_dev))
+      w_def2 = mean(use_def2(opt_w_list[[prod_het]], target_w, u_dev)),
+      trade_def1 = trading_use(farmers_of(prod_het), u_dev, target_w, 1),
+      trade_def2 = trading_use(farmers_of(prod_het), u_dev, target_w, 2)
     ),
     by = .(prod_het, u_dev, target_w)
   ] %>%
@@ -140,11 +179,17 @@ quota_target_def <-
 
 saveRDS(quota_target_def, here::here("Results/quota_target_def.rds"))
 
-#--- check: definition 1 matches the simulated realized use to within 0.02 inch ---#
+#--- checks: definition 1 matches the simulated realized use to within 0.02 inch under a quota, and to within
+#    0.05 inch under trading at a cap of 8 ---#
 check_def1 <-
-  sum_res[instrument_type == "Quota" & measure_type == "Proxy" & dir_cor == "0", .(prod_het, u_dev, target_w, w)] %>%
+  sum_res[instrument_type == "Quota" & measure_type == "Proxy", .(prod_het, u_dev, target_w, w)] %>%
   quota_target_def[., on = .(prod_het, u_dev, target_w)]
 stopifnot(check_def1[, max(abs(w - w_def1))] < 0.02)
+check_trade <- CJ(prod_het = hets, u_dev = c(0.1, 0.3, 0.5), sorted = FALSE)[, .(sim = {
+  tr <- pick("Trading", "Proxy", prod_het, u_dev)
+  at(tr$proxy, tr$w, 8)
+}), by = .(prod_het, u_dev)][quota_target_def[target_w == 8], on = .(prod_het, u_dev)]
+stopifnot(check_trade[, max(abs(sim - trade_def1))] < 0.05)
 
 rounded(quota_target_def[target_w %in% c(8, 10), ])
 ```
@@ -188,7 +233,7 @@ profit_change %>%
   print()
 
 cat("\n== Average profit under a water quota at 8 inches of realized use ($ per acre) ==\n")
-loss_table[u_dev == 0.5 & dir_cor == "0", .(prod_het, profit_water = round(profit_water, 1))] %>% print()
+loss_table[u_dev == 0.5, .(prod_het, profit_water = round(profit_water, 1))] %>% print()
 ```
 
 ## Counterexample to Proposition 1 with very different farmers (Supplementary Note 1)
@@ -298,12 +343,64 @@ saveRDS(error_form_check, here::here("Results/error_form_check.rds"))
 #--- checks: the uniform rows agree with the simulation; with an additive error, a binding quota is met, and
 #    trading leaves no loss where no farmer's estimate reaches zero ---#
 stopifnot(
-  merge(error_form_check[shape == "Uniform"], loss_table[dir_cor == "0", .(prod_het, u_dev, extra_cost)], by = c("prod_het", "u_dev"))[, max(abs(extra_cost_quota - extra_cost))] < 0.25,
+  merge(error_form_check[shape == "Uniform"], loss_table[, .(prod_het, u_dev, extra_cost)], by = c("prod_het", "u_dev"))[, max(abs(extra_cost_quota - extra_cost))] < 0.25,
   error_form_check[shape == "Additive" & prod_het == "Zero", max(abs(use_at_nominal_8 - 8))] < 1e-6,
   error_form_check[shape == "Additive" & share_zero_estimate == 0, max(abs(extra_cost_trading))] < 1e-6
 )
 
 rounded(error_form_check, 3)
+```
+
+## Errors related to water demand (Supplementary Fig. 4)
+
+The same set of ratios of estimated to actual use is given to the farmers in three ways, so that only the relation with water demand changes, not the size or the average of the errors. The set is the 1,000 equally likely values of a ratio uniform on [1 - h, 1 + h] (midpoints of equal-probability intervals). It is given to farmers in order of their unconstrained use, so that the farmers with the highest demand have the lowest ratios (they are under-estimated) or the highest ratios (they are over-estimated); or each farmer's ratio is unrelated to its demand, as in the main simulations, in which case each farmer is evaluated at all 1,000 values. Results are computed exactly for proxy quotas from 5 to 16 inches and for the water quota, and shown for realized use from 7 to 11 inches.
+
+```{r}
+relation_cases <- function(f, h) {
+  n <- nrow(f)
+  ratios <- qunif((seq_len(n) - 0.5) / n, 1 - h, 1 + h)
+  demand_rank <- rank(-f$opt_w, ties.method = "first") # 1: highest unconstrained use
+  list(
+    `Unrelated to demand` = list(f = f[rep(seq_len(n), each = n_points), ], eta = rep(error_points(h, "Uniform"), times = n)),
+    `High-demand farmers under-estimated` = list(f = f, eta = ratios[demand_rank]),
+    `High-demand farmers over-estimated` = list(f = f, eta = rev(ratios)[demand_rank])
+  )
+}
+
+demand_relation <-
+  CJ(prod_het = c("Medium", "High"), u_dev = c(0.1, 0.3, 0.5), sorted = FALSE) %>%
+  .[, {
+    f <- farmers_of(prod_het)
+    cases <- relation_cases(f, u_dev)
+    proxy <- rbindlist(lapply(names(cases), \(k) {
+      cs <- cases[[k]]
+      data.table(quota = seq(5, 16, by = 0.05))[, .(
+        w = mean(pmin(cs$f$opt_w, quota / cs$eta)),
+        profit = mean(profit_of(pmin(cs$f$opt_w, quota / cs$eta), cs$f))
+      ), by = quota][, policy := k]
+    }))
+    water <- data.table(quota = seq(5, 16, by = 0.05))[, .(
+      w = mean(pmin(f$opt_w, quota)), profit = mean(profit_of(pmin(f$opt_w, quota), f))
+    ), by = quota][, policy := "Water quota"]
+    rbind(water, proxy)
+  }, by = .(prod_het, u_dev)] %>%
+  .[w >= 7 & w <= 11, ]
+
+#--- extra cost of each proxy quota relative to the water quota at 8 inches of realized use ---#
+demand_relation_at_8 <-
+  demand_relation[, .(profit_8 = at(w, profit, 8)), by = .(prod_het, u_dev, policy)] %>%
+  dcast(prod_het + u_dev ~ policy, value.var = "profit_8") %>%
+  melt(id.vars = c("prod_het", "u_dev", "Water quota"), variable.name = "policy", value.name = "profit_proxy") %>%
+  .[, extra_cost := `Water quota` - profit_proxy]
+
+saveRDS(list(curves = demand_relation, at_8 = demand_relation_at_8), here::here("Results/demand_relation.rds"))
+
+#--- check: with errors unrelated to demand, the exact extra cost matches the simulation ---#
+stopifnot(
+  merge(demand_relation_at_8[policy == "Unrelated to demand"], loss_table, by = c("prod_het", "u_dev"))[, max(abs(extra_cost.x - extra_cost.y))] < 0.25
+)
+
+dcast(demand_relation_at_8, prod_het + u_dev ~ policy, value.var = "extra_cost") %>% rounded()
 ```
 
 ## Two-farmer examples (Figures 1, 3 and 4)
@@ -423,8 +520,20 @@ numbers_in_text <- list(
   profit_water_trading_same_w = round(water_trade_same_w, 2),
   #--- Supplementary Note 4: largest difference between the calculation and the simulation (uniform ratio),
   #    and between the uniform and log-normal ratio in use at a quota of 8 ---#
-  max_sim_gap = merge(error_form_check[shape == "Uniform"], loss_table[dir_cor == "0", .(prod_het, u_dev, extra_cost)], by = c("prod_het", "u_dev"))[, max(abs(extra_cost_quota - extra_cost))],
+  max_sim_gap = merge(error_form_check[shape == "Uniform"], loss_table[, .(prod_het, u_dev, extra_cost)], by = c("prod_het", "u_dev"))[, max(abs(extra_cost_quota - extra_cost))],
+  #--- largest difference in the hardest-hit 1% between the calculation (exactly 8 inches) and the simulation
+  #    (Figure 6, which compares quotas at about 8 inches), under a quota and under trading ---#
+  max_pct_gap = readRDS(here::here("Results/profit_change.rds"))[prob == 0.01] %>%
+    dcast(prod_het + u_dev ~ instrument_type, value.var = "change") %>%
+    merge(error_form_check[shape == "Uniform"], by = c("prod_het", "u_dev")) %>%
+    .[, c(quota = max(abs(Quota - worst_1pct_quota)), trading = max(abs(Trading - worst_1pct_trading)))],
   ln_use_gap = dcast(error_form_check[shape != "Additive"], prod_het + u_dev ~ shape, value.var = "use_at_nominal_8")[, max(abs(Uniform - `Log-normal`))],
+  #--- Supplementary Note 2: share of identical farmers whose effective limit is above their unconstrained use (12 inches)
+  #    under the proxy quota that gives 8 inches of average use, with the largest errors (eta uniform on [0.5, 1.5]) ---#
+  share_unconstrained_8 = {
+    q8 <- uniroot(\(q) use_def1(12, q, 0.5) - 8, c(4, 12), tol = 1e-10)$root
+    q8 / 12 - 0.5
+  },
   #--- realized use under a water quota of 8 inches, by population ---#
   wq_use_8 = water_summary[instrument_type == "Quota" & target_w == 8, setNames(w, str_to_title(prod_het))]
 )

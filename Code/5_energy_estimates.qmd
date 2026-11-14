@@ -209,7 +209,12 @@ energy_check <- list(
   #--- within a well: percent change in electricity for a 1% change in water pumped ---#
   n_wells_within = within_well[, uniqueN(well)],
   elasticity_within = unname(coef(lm(lk ~ lv, data = within_well))[2]),
-  elasticity_within_year = unname(coef(lm(lk ~ lv + factor(year), data = within_well))[2])
+  elasticity_within_year = unname(coef(lm(lk ~ lv + factor(year), data = within_well))[2]),
+  #--- the size of the error with no ratio screen: every well-year, coefficients recalibrated ---#
+  mad_well_unscreened = copy(all_years)[, ratio := (1 / mean(1 / w_per_kwh)) / w_per_kwh, by = district] %>%
+    .[, .(ratio = mean(ratio)), by = well] %>%
+    .[, mean(abs(ratio - 1))],
+  mad_obs_unscreened = copy(all_years)[, ratio := (1 / mean(1 / w_per_kwh)) / w_per_kwh, by = district][, mean(abs(ratio - 1))]
 )
 
 saveRDS(energy_check, here::here("Results/energy_check.rds"))

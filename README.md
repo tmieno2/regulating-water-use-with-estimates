@@ -8,11 +8,11 @@ Code and data that reproduce every number, table and figure in "Regulating water
 |---|---|---|
 | `Code/0_functions.qmd` | Prices, production functions and simulation functions, loaded by the other files. Rendering it runs checks of the functions. | Nothing |
 | `Code/1_simulation.qmd` | Simulates three populations of 1,000 farmers under a quota on water use and a quota on estimated water use, with and without trading. | `Results/` |
-| `Code/2_calculations.qmd` | Numbers quoted in the text, Supplementary Tables 1 to 3, Supplementary Notes 1, 2 and 4, and the two-farmer examples. | `Results/` |
+| `Code/2_calculations.qmd` | Numbers quoted in the text, Supplementary Tables 1 to 3, Supplementary Notes 1, 2 and 4, exact calculations for errors related to water demand and for the two senses of an unbiased estimate (Supplementary Figs. 4 and 5), and the two-farmer examples. | `Results/` |
 | `Code/3_figures.qmd` | Figures 1 to 6 and Supplementary Figs. 1 to 5. | `Figures/` |
 | `Code/4_well_records.qmd` | Downloads the Nebraska well and power records and the well registry, and builds the tables that step 5 pairs. | `Data/raw/`, `Results/` |
 | `Code/5_energy_estimates.qmd` | Pairs wells with electricity records (only if step 4 has been run) and compares an electricity-based estimate with metered pumping (Supplementary Note 3, Supplementary Fig. 6). | `Results/`, `Figures/` |
-| `Code/6_error_scaling.qmd` | Downloads public data that pair satellite estimates with metered or reported use, and measures how the error grows with water use (Supplementary Note 5, Supplementary Table 5). | `Results/` |
+| `Code/6_error_scaling.qmd` | Downloads public data that pair satellite estimates with metered or reported use, and measures how the error grows with water use, with and without screens for faulty records (Supplementary Note 5, Supplementary Table 5). | `Results/` |
 | `Data/energy_water_deidentified.csv` | The paired Nebraska records with well identifiers and locations removed: an arbitrary well number, district, year, irrigated acres, metered pumping (acre-feet) and electricity use (kWh). | |
 
 ## How to run
@@ -29,7 +29,7 @@ quarto render Code/5_energy_estimates.qmd
 quarto render Code/6_error_scaling.qmd
 ```
 
-Each rendered file (`Code/*.html`) shows the numbers it computes. Step 1 takes about 20 minutes on a computer with 16 cores and 128 GB of memory; the other steps take a few minutes each, plus the downloads (about 360 MB, which take about 520 MB once unzipped).
+Each rendered file (`Code/*.html`) shows the numbers it computes. Step 1 takes about 15 minutes on a computer with 16 cores and 128 GB of memory, and step 2 about 6 minutes; the other steps take a few minutes each, plus the downloads (about 360 MB, which take about 520 MB once unzipped).
 
 Steps 4 to 6 (Supplementary Notes 3 and 5) do not need steps 1 to 3, so they can be checked without the simulation. Steps 5 and 6 can also be run without step 4, from the shared file `Data/energy_water_deidentified.csv`. The pairing of wells with electricity records, and the numbers that need well depth and electrical load, are then skipped, because they need the tables that step 4 builds. Those tables contain well locations and are not shared. When step 4 has been run, step 5 writes a rebuilt copy of the shared file to `Results/` and reports whether it is identical; it can differ if the well registry has changed since 12 November 2026.
 

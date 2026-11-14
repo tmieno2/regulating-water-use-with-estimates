@@ -69,7 +69,7 @@ set.seed(20241113)
 
 eta_data <-
   lapply(c(0.1, 0.3, 0.5), \(u) {
-    make_quota_data(populations$farmer_data[[1]], target_w = 7, u_dev = u, cor = "0", num_it = 1) %>%
+    make_quota_data(populations$farmer_data[[1]], target_w = 7, u_dev = u, num_it = 1) %>%
       .[, u_dev := u]
   }) %>%
   rbindlist() %>%
@@ -90,7 +90,7 @@ ggsave(fig("g_eta_dist.png"), g_eta_dist, height = 5, width = 6, dpi = 400)
 
 ```{r}
 quota_plot_data <-
-  rbind(sum_res[dir_cor == "0" & measure_type == "Proxy", ], water_by_error(sum_res[measure_type == "Water", ])) %>%
+  rbind(sum_res[measure_type == "Proxy", ], water_by_error(sum_res[measure_type == "Water", ])) %>%
   .[instrument_type == "Quota", ]
 
 y_lims <- quota_plot_data[, c(floor(min(profit / 10)), ceiling(max(profit / 10)))] * 10
@@ -114,7 +114,7 @@ ggsave(fig("g_profit_quota_comp_stat.png"), g_profit_quota_comp_stat, width = 6,
 
 ```{r}
 trading_plot_data <-
-  rbind(water_by_error(sum_res[measure_type == "Water", ]), sum_res[dir_cor == "0" & u_dev != 0 & measure_type == "Proxy", ])
+  rbind(water_by_error(sum_res[measure_type == "Water", ]), sum_res[u_dev != 0 & measure_type == "Proxy", ])
 
 y_lims <- trading_plot_data[, c(floor(min(profit / 10)), ceiling(max(profit / 10)))] * 10
 
@@ -163,7 +163,7 @@ ggsave(fig("g_profit_change.png"), g_profit_change, height = 6, width = 6, dpi =
 
 ```{r}
 quota_target_data <-
-  rbind(water_by_error(sum_res[measure_type == "Water", ]), sum_res[measure_type == "Proxy" & dir_cor == "0", ]) %>%
+  rbind(water_by_error(sum_res[measure_type == "Water", ]), sum_res[measure_type == "Proxy", ]) %>%
   #--- nominal cap: the quota itself, or under trading the allowance per farmer (average estimated use) ---#
   .[, nominal := ifelse(instrument_type == "Quota", target_w, proxy)]
 
@@ -185,38 +185,31 @@ ggsave(fig("g_quota_target.png"), g_quota_target, height = 6, width = 6, dpi = 4
 
 ## Errors related to water demand (Supplementary Fig. 4)
 
-Shown for the medium-heterogeneity population only. With no heterogeneity the three cases are the same, and with high heterogeneity some effective limits are below zero (those farmers use no water) when high-demand farmers are over-estimated.
+Computed exactly in `Code/2_calculations.qmd` for the medium- and high-heterogeneity populations. With identical farmers the three cases are the same.
 
 ```{r}
-relation_labels <- c(
-  "+" = "Proxy quota, high-demand farmers under-estimated",
-  "0" = "Proxy quota, errors unrelated to water demand",
-  "-" = "Proxy quota, high-demand farmers over-estimated"
-)
+relation_levels <- c("Water quota", "Unrelated to demand", "High-demand farmers under-estimated", "High-demand farmers over-estimated")
+relation_labels <- c("Water quota", paste("Proxy quota, errors", c("unrelated to water demand", "with high-demand farmers under-estimated", "with high-demand farmers over-estimated")))
 
-dir_cor_data <-
-  rbind(
-    sum_res[measure_type == "Proxy" & u_dev > 0, .(u_dev, w, profit, dir_cor, instrument_type, prod_het)] %>%
-      .[, policy := relation_labels[dir_cor]],
-    water_by_error(sum_res[measure_type == "Water", .(w, profit, dir_cor, instrument_type, prod_het)])[, policy := "Water quota"]
-  ) %>%
-  .[instrument_type == "Quota" & prod_het == "Medium" & w <= 11, ] %>%
-  .[, policy := factor(policy, levels = c("Water quota", relation_labels))]
+demand_relation_data <-
+  readRDS(here::here("Results/demand_relation.rds"))$curves %>%
+  .[, policy := factor(relation_labels[match(policy, relation_levels)], levels = relation_labels)] %>%
+  .[, prod_het := factor(prod_het, c("Medium", "High"))]
 
 g_profit_dir_cor <-
-  ggplot(data = dir_cor_data) +
+  ggplot(data = demand_relation_data) +
   geom_line(aes(y = profit, x = w, color = policy, linetype = policy)) +
-  facet_grid(. ~ u_dev, labeller = panel_labels) +
+  facet_grid(prod_het ~ u_dev, labeller = panel_labels, scales = "free_y") +
   ylab("Profit ($/acre)") +
   xlab("Realized Water Use (inches)") +
-  scale_color_manual(values = setNames(c(pal_measure[["Water"]], rep(pal_measure[["Proxy"]], 3)), levels(dir_cor_data$policy)), name = NULL) +
-  scale_linetype_manual(values = setNames(c("solid", "dashed", "solid", "dotted"), levels(dir_cor_data$policy)), name = NULL) +
+  scale_color_manual(values = setNames(c(pal_measure[["Water"]], rep(pal_measure[["Proxy"]], 3)), relation_labels), name = NULL) +
+  scale_linetype_manual(values = setNames(c("solid", "solid", "dashed", "dotted"), relation_labels), name = NULL) +
   scale_x_continuous(breaks = 7:11) +
   guides(color = guide_legend(ncol = 1), linetype = guide_legend(ncol = 1)) +
   theme_bw() +
-  theme(legend.position = "bottom", legend.key.width = unit(1.2, "cm"), panel.grid.minor = element_blank())
+  theme(legend.position = "bottom", legend.key.width = unit(1.2, "cm"), panel.grid.minor = element_blank(), panel.spacing.y = unit(1, "lines"))
 
-ggsave(fig("g_profit_dir_cor.png"), g_profit_dir_cor, height = 4.5, width = 6.5, dpi = 400)
+ggsave(fig("g_profit_dir_cor.png"), g_profit_dir_cor, height = 6, width = 6.5, dpi = 400)
 ```
 
 ## Two senses of an unbiased estimate (Supplementary Fig. 5)
@@ -224,7 +217,9 @@ ggsave(fig("g_profit_dir_cor.png"), g_profit_dir_cor, height = 4.5, width = 6.5,
 ```{r}
 def_labels <- c(
   w_def1 = "Proxy quota, estimated / actual use averages 1",
-  w_def2 = "Proxy quota, actual / estimated use averages 1"
+  w_def2 = "Proxy quota, actual / estimated use averages 1",
+  trade_def1 = "Proxy-quota trading, estimated / actual use averages 1",
+  trade_def2 = "Proxy-quota trading, actual / estimated use averages 1"
 )
 
 quota_target_def_data <-
@@ -241,10 +236,10 @@ g_quota_target_def <-
   geom_abline(slope = 1, intercept = 0, color = "grey50", linetype = "dotted") +
   geom_line(aes(x = target_w, y = w, color = policy, linetype = policy)) +
   facet_grid(u_dev ~ prod_het, labeller = panel_labels) +
-  xlab("Nominal quota per farmer (inches of water or of estimated water use)") +
+  xlab("Nominal cap per farmer (inches of water or of estimated water use)") +
   ylab("Realized water use (inches)") +
-  scale_color_manual(values = setNames(c(pal_measure[["Water"]], rep(pal_measure[["Proxy"]], 2)), levels(quota_target_def_data$policy)), name = NULL) +
-  scale_linetype_manual(values = setNames(c("solid", "solid", "dashed"), levels(quota_target_def_data$policy)), name = NULL) +
+  scale_color_manual(values = setNames(c(pal_measure[["Water"]], rep(pal_measure[["Proxy"]], 2), rep(pal_instrument[["Trading"]], 2)), levels(quota_target_def_data$policy)), name = NULL) +
+  scale_linetype_manual(values = setNames(c("solid", "solid", "dashed", "solid", "dashed"), levels(quota_target_def_data$policy)), name = NULL) +
   scale_x_continuous(breaks = 7:13) +
   guides(color = guide_legend(ncol = 1), linetype = guide_legend(ncol = 1)) +
   theme_bw() +
@@ -255,7 +250,7 @@ g_quota_target_def <-
     panel.spacing.y = unit(1, "lines")
   )
 
-ggsave(fig("g_quota_target_def.png"), g_quota_target_def, height = 6.5, width = 6, dpi = 400)
+ggsave(fig("g_quota_target_def.png"), g_quota_target_def, height = 7, width = 6, dpi = 400)
 ```
 
 ## Two-farmer examples (Figures 1, 3 and 4)

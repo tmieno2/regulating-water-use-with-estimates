@@ -51,10 +51,14 @@ if (!all(file.exists(file.path(dl, basename(zipper_files))))) {
 
 ## Pairs of metered and estimated use
 
-Each data set becomes a table with `metered` and `estimate`, both in millimeters of water per unit area. In every data set, records whose ratio of estimated to metered use is below 1/3 or above 3 are left out as faulty, as in Supplementary Note 3.
+Each data set becomes a table with `unit` (the water-right group, field or well), `metered` and `estimate`, both in millimeters of water per unit area. In the main results, records whose ratio of estimated to metered use is below 1/3 or above 3 are left out as faulty, as in Supplementary Note 3. For the satellite data sets this screen is applied to the estimate as published, before it is scaled; for Nebraska, whose electricity use must first be converted to water, it is applied after a first calibration within each district, and the estimate is then calibrated again. The last section repeats the results with no screen and with a stricter one.
 
 ```{r}
-keep_plausible <- \(x) x[estimate > 0 & metered > 0 & estimate / metered >= 1 / 3 & estimate / metered <= 3, ]
+#--- keep records with positive use and, unless lo is NA, a ratio of estimated to metered use between lo and 1 / lo ---#
+keep_plausible <- \(x, lo = 1 / 3) {
+  x <- x[estimate > 0 & metered > 0, ]
+  if (is.na(lo)) x else x[estimate / metered >= lo & estimate / metered <= 1 / lo, ]
+}
 
 #--- Kansas: water-right groups more than half inside the management area, years up to 2020, as in Zipper et al. (2024).
 #    Groups whose satellite-mapped irrigated area differs from the reported irrigated area by more than 10% are left out. ---#
@@ -69,34 +73,41 @@ field_est <-
   fread(file.path(dl, "WRGs_WRGbyField.csv"))[., on = "UID", nomatch = NULL] %>%
   .[, .(est_m3 = sum(FieldIrrigationPeff_m3)), by = .(WR_GROUP, Year)]
 
-kansas <-
+kansas_all <-
   use[field_est, on = .(WR_GROUP, Year), nomatch = NULL] %>%
   .[is.finite(WRGirrigationTotal_m3), .(
+    unit = WR_GROUP,
     metered = 1000 * WRGirrigationTotal_m3 / WRGirrAreaReported_m2,
     estimate = 1000 * est_m3 / irr_area_m2
-  )] %>%
-  keep_plausible()
+  )]
 
 #--- Nevada and Oregon: fields ---#
-ott <- function(f) {
-  fread(file.path(dl, f)) %>%
-    .[, .(metered = pumping_mm, estimate = annual_net_et_mm)] %>%
-    keep_plausible()
-}
-nevada <- ott("dv_joined_et_pumping_data_all.csv")
-oregon <- ott("hb_joined_et_pumping_data_all.csv")
+nevada_all <- fread(file.path(dl, "dv_joined_et_pumping_data_all.csv"))[, .(unit = dri_field_id, metered = pumping_mm, estimate = annual_net_et_mm)]
+oregon_all <- fread(file.path(dl, "hb_joined_et_pumping_data_all.csv"))[, .(unit = fid, metered = pumping_mm, estimate = annual_net_et_mm)]
 ```
 
 Nebraska: well-years for 2007 and 2009 to 2012, as in Supplementary Note 3. The estimate is calibrated by district, so the screen is applied after a first calibration within each district.
 
 ```{r}
-nebraska <-
+nebraska_with <- function(lo = 1 / 3) {
   fread(here::here("Data/energy_water_deidentified.csv")) %>%
-  .[, .(district, metered = 25.4 * volaf * 12 / acres, raw = kwh / acres)] %>%
-  .[, estimate := raw / mean(raw / metered), by = district] %>%
-  keep_plausible() %>%
-  .[, estimate := raw / mean(raw / metered), by = district] %>%
-  .[, .(metered, estimate)]
+    .[, .(unit = well, district, metered = 25.4 * volaf * 12 / acres, raw = kwh / acres)] %>%
+    .[metered > 0 & raw > 0, ] %>%
+    .[, estimate := raw / mean(raw / metered), by = district] %>%
+    keep_plausible(lo) %>%
+    .[, estimate := raw / mean(raw / metered), by = district] %>%
+    .[, .(unit, metered, estimate)]
+}
+
+data_sets <- function(lo = 1 / 3) {
+  list(
+    Kansas = keep_plausible(kansas_all, lo),
+    Nevada = keep_plausible(nevada_all, lo),
+    Oregon = keep_plausible(oregon_all, lo),
+    Nebraska = nebraska_with(lo)
+  )
+}
+main_sets <- data_sets()
 ```
 
 ## How the error scales with use (Supplementary Table 5)
@@ -129,13 +140,52 @@ scaling <- function(x, data_set, estimate_kind, unit) {
 }
 
 error_scaling <- rbind(
-  scaling(kansas, "Kansas", "Satellite (OpenET ensemble)", "Water-right group and year"),
-  scaling(nevada, "Nevada", "Satellite (OpenET ensemble)", "Field and year"),
-  scaling(oregon, "Oregon", "Satellite (OpenET ensemble)", "Field and year"),
-  scaling(nebraska, "Nebraska", "Electricity use", "Well and year")
+  scaling(main_sets$Kansas, "Kansas", "Satellite (OpenET ensemble)", "Water-right group and year"),
+  scaling(main_sets$Nevada, "Nevada", "Satellite (OpenET ensemble)", "Field and year"),
+  scaling(main_sets$Oregon, "Oregon", "Satellite (OpenET ensemble)", "Field and year"),
+  scaling(main_sets$Nebraska, "Nebraska", "Electricity use", "Well and year")
 )
 
 saveRDS(error_scaling, here::here("Results/error_scaling.rds"))
 
 error_scaling[, lapply(.SD, \(v) if (is.numeric(v)) round(v, 2) else v)]
+```
+
+## Sensitivity to the screen, and uncertainty
+
+The slope against the average of metered and estimated use, with the main screen (ratio between 1/3 and 3), a stricter screen (between 1/2 and 2) and no screen. The 95% interval resamples water-right groups, fields or wells with replacement (500 times), so that the years of one unit stay together.
+
+```{r}
+slope_average <- function(x) {
+  x <- copy(x)[, estimate := estimate / mean(estimate / metered)][, error := estimate - metered][, level := (metered + estimate) / 2]
+  x <- x[abs(error) > 0, ]
+  unname(coef(lm(log(abs(error)) ~ log(level), data = x))[2])
+}
+
+interval <- function(x, reps = 500) {
+  set.seed(20261113)
+  units <- unique(x$unit)
+  draws <- replicate(reps, slope_average(x[data.table(unit = sample(units, replace = TRUE)), on = "unit", allow.cartesian = TRUE]))
+  quantile(draws, c(0.025, 0.975))
+}
+
+error_scaling_screens <-
+  rbindlist(lapply(c(1 / 3, 1 / 2, NA), \(lo) {
+    sets <- data_sets(lo)
+    rbindlist(lapply(names(sets), \(ds) {
+      ci <- interval(sets[[ds]])
+      data.table(
+        screen = if (is.na(lo)) "None" else paste0("1/", round(1 / lo), " to ", round(1 / lo)),
+        data_set = ds, n = nrow(sets[[ds]]), units = uniqueN(sets[[ds]]$unit),
+        slope_average = slope_average(sets[[ds]]), lower_95 = ci[[1]], upper_95 = ci[[2]]
+      )
+    }))
+  }))
+
+#--- check: with the main screen, the slope matches Supplementary Table 5 ---#
+stopifnot(isTRUE(all.equal(error_scaling_screens[screen == "1/3 to 3", slope_average], error_scaling$slope_average)))
+
+saveRDS(error_scaling_screens, here::here("Results/error_scaling_screens.rds"))
+
+error_scaling_screens[, lapply(.SD, \(v) if (is.numeric(v)) round(v, 2) else v)]
 ```
